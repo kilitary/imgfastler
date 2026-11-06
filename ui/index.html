@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Imgfastler</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img src="./logo.svg" alt="" width="32" height="32" />
+        <div class="brand-text">
+          <h1>Imgfastler</h1>
+          <p>Start a container from any local image</p>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-btn is-active" data-view="images" type="button">Images</button>
+        <button class="nav-btn" data-view="containers" type="button">Containers</button>
+        <button class="nav-btn" data-view="networks" type="button">Networks</button>
+      </nav>
+
+      <div class="topbar-actions">
+        <span class="engine" id="engine-info" title="Docker Engine">…</span>
+        <span class="muted" id="last-updated"></span>
+        <button class="btn btn-sm" id="live-btn" type="button" aria-pressed="false">Live: off</button>
+        <button class="btn" id="refresh-btn" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <div id="backend-warning" class="backend-warning hidden">
+      <strong>Backend not running</strong>
+      <p>Start the backend with <code>make run-backend</code> in the project directory.</p>
+      <p>Or use this as a Docker Desktop extension: <code>make build-extension && make install-extension</code></p>
+    </div>
+
+    <main>
+      <!-- ============================ IMAGES ============================ -->
+      <section class="view" id="view-images">
+        <div class="toolbar">
+          <input
+            class="search"
+            id="image-search"
+            type="search"
+            placeholder="Filter images by repository, tag or id"
+            autocomplete="off"
+          />
+          <span class="muted" id="image-count"></span>
+        </div>
+
+        <div class="panel">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Image</th>
+                <th>ID</th>
+                <th>Size</th>
+                <th>Created</th>
+                <th>Used by</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="images-body">
+              <tr class="row-loading">
+                <td colspan="6">Loading images…</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="empty hidden" id="images-empty">
+            <p class="empty-title">No images found</p>
+            <p class="muted">Pull an image with <code>docker pull</code> and refresh.</p>
+          </div>
+          <div class="empty error hidden" id="images-error"></div>
+        </div>
+      </section>
+
+      <!-- =========================== CREATE ============================= -->
+      <section class="view hidden" id="view-create">
+        <form id="create-form" novalidate>
+          <div class="form-header">
+            <button class="btn" type="button" id="back-btn">← Back</button>
+            <div>
+              <h2>Create container</h2>
+              <p class="muted" id="create-image"></p>
+            </div>
+          </div>
+
+          <fieldset>
+            <legend>General</legend>
+            <div class="grid">
+              <label class="field">
+                <span>Container name <em>(optional)</em></span>
+                <input id="c-name" type="text" placeholder="e.g. my-nginx" autocomplete="off" />
+                <small class="hint">Must match <code>[a-zA-Z0-9][a-zA-Z0-9_.-]*</code></small>
+              </label>
+              <label class="field">
+                <span>Restart policy</span>
+                <select id="c-restart">
+                  <option value="no">no</option>
+                  <option value="always">always</option>
+                  <option value="unless-stopped">unless-stopped</option>
+                  <option value="on-failure">on-failure</option>
+                </select>
+              </label>
+              <label class="field field-wide">
+                <span>Command <em>(optional override)</em></span>
+                <input
+                  id="c-command"
+                  type="text"
+                  placeholder="e.g. nginx -g 'daemon off;'"
+                  autocomplete="off"
+                />
+              </label>
+              <label class="field field-wide">
+                <span>Entrypoint <em>(optional override)</em></span>
+                <input
+                  id="c-entrypoint"
+                  type="text"
+                  placeholder="e.g. /docker-entrypoint.sh"
+                  autocomplete="off"
+                />
+              </label>
+              <label class="field field-wide">
+                <span>Hostname <em>(optional)</em></span>
+                <input id="c-hostname" type="text" placeholder="e.g. my-nginx" autocomplete="off" />
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Environment variables</legend>
+            <div class="rows" id="env-rows"></div>
+            <button class="btn btn-ghost" type="button" id="add-env">+ Add variable</button>
+          </fieldset>
+
+          <fieldset>
+            <legend>Ports</legend>
+            <div class="rows" id="port-rows"></div>
+            <button class="btn btn-ghost" type="button" id="add-port">+ Add port</button>
+            <p class="hint">Leave the host port empty to publish the container port on a random port.</p>
+          </fieldset>
+
+          <fieldset>
+            <legend>Mounts</legend>
+            <div class="rows" id="mount-rows"></div>
+            <button class="btn btn-ghost" type="button" id="add-mount">+ Add mount</button>
+            <p class="hint">
+              Bind: <code>/host/path</code> → <code>/container/path</code>. Volume: <code>volume-name</code> →
+              <code>/container/path</code>.
+            </p>
+          </fieldset>
+
+          <fieldset>
+            <legend>Networks</legend>
+            <div class="chips" id="network-list">
+              <span class="muted">Loading networks…</span>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Networks already in use</legend>
+            <div id="create-network-usage" class="network-usage">
+              <span class="muted">Loading…</span>
+            </div>
+          </fieldset>
+
+          <div class="form-actions">
+            <button class="btn btn-primary" type="submit" id="submit-btn">Create container</button>
+            <span class="muted" id="create-status"></span>
+          </div>
+        </form>
+      </section>
+
+      <!-- ========================= CONTAINERS =========================== -->
+      <section class="view hidden" id="view-containers">
+        <div class="toolbar">
+          <input
+            class="search"
+            id="container-search"
+            type="search"
+            placeholder="Filter containers by name, image or id"
+            autocomplete="off"
+          />
+          <span class="muted" id="container-count"></span>
+        </div>
+
+        <div class="panel">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Image</th>
+                <th>State</th>
+                <th>Ports</th>
+                <th>Networks</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="containers-body">
+              <tr class="row-loading">
+                <td colspan="6">Loading containers…</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="empty hidden" id="containers-empty">
+            <p class="empty-title">No containers</p>
+            <p class="muted">Create one from the Images tab.</p>
+          </div>
+          <div class="empty error hidden" id="containers-error"></div>
+        </div>
+      </section>
+
+      <!-- ======================== NETWORKS ========================== -->
+      <section class="view hidden" id="view-networks">
+        <div class="form-header">
+          <button class="btn" type="button" id="networks-back-btn">← Back</button>
+          <div>
+            <h2>Networks</h2>
+            <p class="muted" id="networks-title"></p>
+          </div>
+          <button class="btn btn-sm" type="button" id="networks-refresh-btn" style="margin-left:auto">
+            Refresh
+          </button>
+        </div>
+
+        <div class="stats" id="networks-summary"></div>
+
+        <div class="toolbar">
+          <input
+            class="search"
+            id="network-search"
+            type="search"
+            placeholder="Filter by network name, driver or container IP"
+            autocomplete="off"
+          />
+          <span class="muted" id="network-count"></span>
+        </div>
+
+        <div class="panel">
+          <table class="table networks-table">
+            <thead>
+              <tr>
+                <th>Network</th>
+                <th>Driver</th>
+                <th>Subnet (IPv4)</th>
+                <th>Subnet (IPv6)</th>
+                <th>Containers</th>
+              </tr>
+            </thead>
+            <tbody id="networks-body">
+              <tr class="row-loading">
+                <td colspan="5">Loading networks…</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="empty hidden" id="networks-empty">
+            <p class="empty-title">No networks found</p>
+            <p class="muted">Create one with <code>docker network create</code> and refresh.</p>
+          </div>
+          <div class="empty error hidden" id="networks-error"></div>
+        </div>
+      </section>
+
+      <!-- ======================== CONNECTIONS ========================== -->
+      <section class="view hidden" id="view-connections">
+        <div class="form-header">
+          <button class="btn" type="button" id="connections-back-btn">← Back</button>
+          <div>
+            <h2>Network connections</h2>
+            <p class="muted" id="connections-title"></p>
+          </div>
+          <button class="btn btn-sm" type="button" id="connections-refresh-btn" style="margin-left:auto">
+            Refresh
+          </button>
+        </div>
+
+        <div class="stats" id="connections-summary"></div>
+        <div class="connection-notes" id="connections-notes"></div>
+
+        <div class="toolbar">
+          <input
+            class="search"
+            id="connection-search"
+            type="search"
+            placeholder="Filter by protocol, state, address, port or resolved name"
+            autocomplete="off"
+          />
+          <label class="field">
+            <input type="checkbox" id="resolve-ips" />
+            <span>Resolve IPs</span>
+          </label>
+          <span class="muted" id="connection-count"></span>
+        </div>
+
+        <div class="panel">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Protocol</th>
+                <th>Family</th>
+                <th>State</th>
+                <th>Local</th>
+                <th>Remote</th>
+                <th>UID</th>
+                <th>Inode</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="connections-body">
+              <tr class="row-loading">
+                <td colspan="8">Loading connections…</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="empty hidden" id="connections-empty">
+            <p class="empty-title">No connections</p>
+            <p class="muted">This container has no TCP or UDP sockets in its network namespace.</p>
+          </div>
+          <div class="empty error hidden" id="connections-error"></div>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
+
+    <!-- ============================ LOGS =============================== -->
+    <div class="modal-backdrop hidden" id="log-modal" role="dialog" aria-modal="true" aria-labelledby="log-title">
+      <div class="modal">
+        <div class="modal-header">
+          <h2 id="log-title">Logs</h2>
+          <button class="btn btn-ghost" id="log-close" type="button" aria-label="Close log view">✕</button>
+        </div>
+        <div class="modal-body">
+          <pre id="log-output" class="log mono"></pre>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm" id="log-follow-btn" type="button">Follow: off</button>
+          <span class="muted" id="log-status">…</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================ DEBUG OUTPUT =========================== -->
+    <div class="modal-backdrop hidden" id="debug-modal" role="dialog" aria-modal="true" aria-labelledby="debug-title">
+      <div class="modal" style="max-height: 85vh;">
+        <div class="modal-header">
+          <h2 id="debug-title">Debug Output</h2>
+          <button class="btn btn-ghost" id="debug-close" type="button" aria-label="Close debug view">✕</button>
+        </div>
+        <div class="modal-body">
+          <pre id="debug-output" class="log mono" style="max-height: 60vh;"></pre>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm" id="debug-close-btn" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

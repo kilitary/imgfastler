@@ -1,0 +1,15 @@
+{
+  "icon": "docker.svg",
+  "vm": {
+    "composefile": "docker-compose.yaml",
+    "exposes": { "socket": "imgfastler.sock" }
+  },
+  "ui": {
+    "dashboard-tab": {
+      "title": "Imgfastler",
+      "root": "/ui",
+      "src": "index.html",
+      "backend": { "socket": "imgfastler.sock" }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(.venv/bin/python)",
+      "Exec(command)"
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+# Build context hygiene for the extension image.
+__pycache__/
+*.pyc
+.git/
+*.md
+!README.md

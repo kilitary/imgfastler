@@ -1,0 +1,15 @@
+{
+  "mcp": {
+    "servers": {
+      "rea": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "rea-agents@6.8.0",
+          "mcp"
+        ]
+      }
+    }
+  }
+}

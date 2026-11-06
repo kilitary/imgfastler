@@ -1,0 +1,19 @@
+# Backend service for the imgfastler Docker Desktop extension.
+#
+# Docker Desktop creates a Compose project from this file when the extension
+# is installed. The SDK can only contact the first service, so keep a single
+# service here.
+#
+# ${DESKTOP_PLUGIN_IMAGE} is substituted by Docker Desktop with the image
+# that packages the extension. Never replace it manually.
+services:
+  imgfastler-backend:
+    image: ${DESKTOP_PLUGIN_IMAGE}
+    environment:
+      # Used to launch a short-lived helper container (same image) that reads
+      # /proc/net inside a target container's network namespace.
+      IMGFASTLER_HELPER_IMAGE: ${DESKTOP_PLUGIN_IMAGE}
+    volumes:
+      # Mount the socket that lives *inside* the Desktop VM. Mounting
+      # /var/run/docker.sock from the host causes permission issues.
+      - /var/run/docker.sock.raw:/var/run/docker.sock

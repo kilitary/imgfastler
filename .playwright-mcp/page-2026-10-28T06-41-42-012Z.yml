@@ -1,0 +1,26 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e4]:
+      - heading "imgfastler" [level=1] [ref=e5]
+      - paragraph [ref=e6]: Start a container from any local image
+    - navigation [ref=e7]:
+      - button "Images" [ref=e8] [cursor=pointer]
+      - button "Containers" [ref=e9] [cursor=pointer]
+    - generic [ref=e10]:
+      - generic "Engine 29.9.2 · API 1.56 · linux/amd64" [ref=e11]: Docker 29.9.2
+      - button "Refresh" [ref=e12] [cursor=pointer]
+  - main [ref=e13]:
+    - generic [ref=e14]:
+      - searchbox "Filter images by repository, tag or id" [ref=e16]
+      - table [ref=e18]:
+        - rowgroup [ref=e19]:
+          - row [ref=e20]:
+            - columnheader "Image" [ref=e21]
+            - columnheader "ID" [ref=e22]
+            - columnheader "Size" [ref=e23]
+            - columnheader "Created" [ref=e24]
+            - columnheader "Used by" [ref=e25]
+            - columnheader "Actions" [ref=e26]
+        - rowgroup [ref=e27]:
+          - row [ref=e28]:
+            - cell "Loading images…" [ref=e29]

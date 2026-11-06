@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: imgfastler/dev-backend
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TEST_PORT=8099
+      - LOG_LEVEL=INFO
+    command: python /opt/imgfastler/server.py
+    network_mode: host
