@@ -40,6 +40,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from datetime import datetime
 from typing import Any, Literal
 
@@ -494,6 +495,12 @@ def _dump_container_sockets(container: Any) -> str:
 # --- routes ------------------------------------------------------------
 
 
+@app.get("/health")
+def health_liveness() -> dict[str, Any]:
+    """Bare liveness probe: process is up, no Docker engine round-trip."""
+    return {"status": "ok"}
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     try:
@@ -514,10 +521,33 @@ def health() -> dict[str, Any]:
 
 @app.get("/api/images")
 def list_images() -> list[dict[str, Any]]:
+    client = get_client()
     try:
-        images = get_client().images.list()
+        images = client.images.list()
     except DockerException as exc:
         raise as_http_error(exc) from exc
+
+    # image.attrs["Containers"] is unreliable (docker-py's /images/json payload
+    # leaves it at 0/-1), so count actual containers per image id instead and
+    # keep the container names so the UI can link to them.
+    in_use_by_id: Counter[str] = Counter()
+    containers_by_id: dict[str, list[dict[str, str]]] = {}
+    try:
+        for container in client.containers.list(all=True):
+            image_id = (container.attrs.get("Image") or "").split("@")[0]
+            if not image_id:
+                continue
+            in_use_by_id[image_id] += 1
+            containers_by_id.setdefault(image_id, []).append(
+                {
+                    "id": container.id,
+                    "short_id": container.short_id,
+                    "name": container.name,
+                    "state": (container.attrs.get("State") or {}).get("Status", "unknown"),
+                }
+            )
+    except DockerException:
+        pass  # fall back to the (possibly zero) attr values below
 
     result = [
         {
@@ -527,7 +557,8 @@ def list_images() -> list[dict[str, Any]]:
             "size": (image.attrs or {}).get("Size", 0),
             "virtual_size": (image.attrs or {}).get("VirtualSize", 0),
             "created": _created_timestamp((image.attrs or {}).get("Created")),
-            "in_use": (image.attrs or {}).get("Containers", 0),
+            "in_use": in_use_by_id.get(image.id, (image.attrs or {}).get("Containers", 0) or 0),
+            "containers": containers_by_id.get(image.id, []),
             "shared_size": (image.attrs or {}).get("SharedSize", 0),
         }
         for image in images

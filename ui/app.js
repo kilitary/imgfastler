@@ -454,7 +454,18 @@
             <td class="mono">${escapeHtml(image.short_id)}</td>
             <td>${formatBytes(image.size)}</td>
             <td>${timeAgo(image.created)}</td>
-            <td>${image.in_use > 0 ? `${image.in_use} container(s)` : '<span class="muted">—</span>'}</td>
+            <td class="used-by">${
+              image.containers.length
+                ? image.containers
+                    .map(
+                      (c) =>
+                        `<a href="#containers" class="used-by-link${c.state === 'running' ? '' : ' is-stopped'}" ` +
+                        `data-container-id="${escapeHtml(c.id)}" title="Show ${escapeHtml(c.name)} in container list">` +
+                        `${escapeHtml(c.name)}</a>`
+                    )
+                    .join('<span class="muted">, </span>')
+                : '<span class="muted">—</span>'
+            }</td>
             <td class="col-actions">
               <button class="btn btn-sm btn-primary" data-action="run" type="button">Run</button>
               <button class="btn btn-sm" data-action="layers" type="button">Layers</button>
@@ -1200,6 +1211,19 @@
 
   /* ------------------------------ containers --------------------------- */
 
+  // Navigate to the containers list and highlight one row for ~5 seconds.
+  // Works from any view that has container ids (image "used by" links, etc.).
+  function revealContainer(containerId) {
+    showView('containers');
+    loadContainers().then(() => {
+      const row = document.querySelector(`#containers-body tr[data-id="${CSS.escape(containerId)}"]`);
+      if (!row) return;
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      row.classList.add('row-flash');
+      setTimeout(() => row.classList.remove('row-flash'), 5000);
+    });
+  }
+
   async function loadContainers() {
     const body = $('#containers-body');
     body.innerHTML = '<tr class="row-loading"><td colspan="6">Loading containers…</td></tr>';
@@ -1572,6 +1596,15 @@
         if (image) deleteImage(image, button);
         return;
       }
+    });
+
+    // "Used by" links on the image list: jump to the container list and
+    // highlight the container row for a few seconds.
+    $('#images-body').addEventListener('click', (event) => {
+      const link = event.target.closest('.used-by-link');
+      if (!link) return;
+      event.preventDefault();
+      revealContainer(link.dataset.containerId);
     });
 
     $('#containers-body').addEventListener('click', (event) => {

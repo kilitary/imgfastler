@@ -1,7 +1,10 @@
 IMAGE ?= imgfastler/imgfastler
 TAG ?= latest
 
-PYTHON ?= .venv/bin/python
+# The project .venv lives on /mnt/projects which is mounted noexec — its
+# compiled extensions (pydantic_core etc.) cannot be mapped there. Fall back
+# to the dev venv in the home directory when the local one can't import.
+PYTHON ?= $(shell .venv/bin/python -c "import pydantic_core" 2>/dev/null && echo .venv/bin/python || echo $(HOME)/.venvs/imgfastler/bin/python)
 TEST_PORT ?= 8099
 
 BUILDER = buildx-multi-arch
@@ -50,11 +53,22 @@ run-collector: ## Create + start the collector container (10s cron cadence, host
 	docker run -d --name collector-stack --network host \
 		--restart unless-stopped \
 		-v /var/run/docker.sock.raw:/var/run/docker.sock \
+		-v /home/deconf/imgfastler/logs:/logs \
 		imgfastler-collector:latest
-	@echo "Collector running; logs: docker logs -f collector-stack"
+	@echo "Collector running; logs: tail -f /home/deconf/imgfastler/logs/collector.log"
+
+collector: #akll
+	bash scripts/build_collector_image.sh
+	make run-collector
 
 stop-collector: ## Stop and remove the collector container
 	-docker rm -f collector-stack
+
+grafana-sync: ## Sync grafana/ config to the VM staging dir and recreate grafana-stack
+	bash scripts/grafana_sync.sh
+
+grafana-stage: ## Only copy grafana/ config to the staging dir (no container recreation)
+	bash scripts/grafana_sync.sh --no-recreate
 
 test-backend: ## Smoke test the API served by `make run-backend` (uses python3 only)
 	python3 scripts/smoke.py http://127.0.0.1:$(TEST_PORT)
@@ -96,5 +110,5 @@ prepare-buildx: ## Create a buildx builder for multi-arch builds, if it does not
 
 .PHONY: help build-extension install-extension update-extension uninstall-extension \
 	inspect-extension run-backend run-backend-docker stop-backend-docker dev-ui test-backend \
-	build-collector run-collector stop-collector \
+	build-collector run-collector stop-collector grafana-sync grafana-stage \
 	test check lint format lint-fix push-extension prepare-buildx

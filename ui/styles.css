@@ -365,6 +365,44 @@ main {
   font-weight: 500;
 }
 
+/* "Used by" links on the image list -> container list */
+.used-by-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+  border-bottom: 1px dotted var(--accent);
+  cursor: pointer;
+}
+
+.used-by-link:hover {
+  text-decoration: underline;
+}
+
+.used-by-link.is-stopped {
+  color: var(--muted, #94a3b8);
+  border-bottom-color: var(--muted, #94a3b8);
+}
+
+/* Temporary highlight for a revealed container row (5s) */
+.row-flash {
+  animation: row-flash 5s ease-out forwards;
+}
+
+@keyframes row-flash {
+  0% {
+    background: var(--accent-soft);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  70% {
+    background: var(--accent-soft);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  100% {
+    background: transparent;
+    box-shadow: none;
+  }
+}
+
 .badge {
   display: inline-block;
   font-size: 12px;
