@@ -3,6 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
     <title>Imgfastler</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -44,8 +46,9 @@
             class="search"
             id="image-search"
             type="search"
-            placeholder="Filter images by repository, tag or id"
+            placeholder="Filter images by repository, tag or id…"
             autocomplete="off"
+            aria-label="Filter images"
           />
           <span class="muted" id="image-count"></span>
         </div>
@@ -85,6 +88,7 @@
               <h2>Create container</h2>
               <p class="muted" id="create-image"></p>
             </div>
+            <button class="btn btn-sm header-action" type="button" id="docs-btn">📖 Documentation</button>
           </div>
 
           <fieldset>
@@ -131,12 +135,24 @@
 
           <fieldset>
             <legend>Environment variables</legend>
+            <div class="row-header env" aria-hidden="true">
+              <span class="col-label">Name</span>
+              <span class="col-label">Value</span>
+              <span></span>
+            </div>
             <div class="rows" id="env-rows"></div>
             <button class="btn btn-ghost" type="button" id="add-env">+ Add variable</button>
           </fieldset>
 
           <fieldset>
             <legend>Ports</legend>
+            <div class="row-header port" aria-hidden="true">
+              <span class="col-label">Host port</span>
+              <span class="col-label">Container port</span>
+              <span class="col-label">Protocol</span>
+              <span class="col-label">Host IP</span>
+              <span></span>
+            </div>
             <div class="rows" id="port-rows"></div>
             <button class="btn btn-ghost" type="button" id="add-port">+ Add port</button>
             <p class="hint">Leave the host port empty to publish the container port on a random port.</p>
@@ -144,6 +160,13 @@
 
           <fieldset>
             <legend>Mounts</legend>
+            <div class="row-header mount" aria-hidden="true">
+              <span class="col-label">Type</span>
+              <span class="col-label">Source</span>
+              <span class="col-label">Target</span>
+              <span class="col-label">Access</span>
+              <span></span>
+            </div>
             <div class="rows" id="mount-rows"></div>
             <button class="btn btn-ghost" type="button" id="add-mount">+ Add mount</button>
             <p class="hint">
@@ -161,14 +184,17 @@
 
           <fieldset>
             <legend>Networks already in use</legend>
-            <div id="create-network-usage" class="network-usage">
-              <span class="muted">Loading…</span>
-            </div>
+            <details id="network-usage-details">
+              <summary id="network-usage-summary"></summary>
+              <div id="create-network-usage" class="network-usage">
+                <span class="muted">Loading…</span>
+              </div>
+            </details>
           </fieldset>
 
           <div class="form-actions">
             <button class="btn btn-primary" type="submit" id="submit-btn">Create container</button>
-            <span class="muted" id="create-status"></span>
+            <span class="muted" id="create-status" aria-live="polite"></span>
           </div>
         </form>
       </section>
@@ -180,8 +206,9 @@
             class="search"
             id="container-search"
             type="search"
-            placeholder="Filter containers by name, image or id"
+            placeholder="Filter containers by name, image or id…"
             autocomplete="off"
+            aria-label="Filter containers"
           />
           <span class="muted" id="container-count"></span>
         </div>
@@ -232,8 +259,9 @@
             class="search"
             id="network-search"
             type="search"
-            placeholder="Filter by network name, driver or container IP"
+            placeholder="Filter by network name, driver or container IP…"
             autocomplete="off"
+            aria-label="Filter networks"
           />
           <span class="muted" id="network-count"></span>
         </div>
@@ -284,11 +312,12 @@
             class="search"
             id="connection-search"
             type="search"
-            placeholder="Filter by protocol, state, address, port or resolved name"
+            placeholder="Filter by protocol, state, address, port or resolved name…"
             autocomplete="off"
+            aria-label="Filter connections"
           />
           <label class="field">
-            <input type="checkbox" id="resolve-ips" />
+            <input type="checkbox" id="resolve-ips" checked />
             <span>Resolve IPs</span>
           </label>
           <span class="muted" id="connection-count"></span>
@@ -337,7 +366,48 @@
         </div>
         <div class="modal-footer">
           <button class="btn btn-sm" id="log-follow-btn" type="button">Follow: off</button>
-          <span class="muted" id="log-status">…</span>
+          <span class="muted" id="log-status" aria-live="polite">…</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================ LAYERS =============================== -->
+    <div class="modal-backdrop hidden" id="layers-modal" role="dialog" aria-modal="true" aria-labelledby="layers-title">
+      <div class="modal" style="max-height: 85vh;">
+        <div class="modal-header">
+          <h2 id="layers-title">Layers</h2>
+          <button class="btn btn-ghost" id="layers-close" type="button" aria-label="Close layers view">✕</button>
+        </div>
+        <div class="modal-body">
+          <div id="layers-info" class="muted"></div>
+          <div id="layers-list" class="layers-list"></div>
+        </div>
+        <div class="modal-footer">
+          <span class="muted" id="layers-status" aria-live="polite"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================ DOCUMENTATION =========================== -->
+    <div class="modal-backdrop hidden" id="docs-modal" role="dialog" aria-modal="true" aria-labelledby="docs-title">
+      <div class="modal" style="max-height: 88vh;">
+        <div class="modal-header">
+          <h2 id="docs-title">Documentation</h2>
+          <button class="btn btn-ghost" id="docs-close" type="button" aria-label="Close documentation">✕</button>
+        </div>
+        <div class="modal-body">
+          <div id="docs-body" class="docs-body"></div>
+        </div>
+        <div class="modal-footer">
+          <a
+            class="btn btn-sm hidden"
+            id="docs-hub-link"
+            href="#"
+            target="_blank"
+            rel="noopener noreferrer"
+          >View on Docker Hub</a>
+          <span class="muted" id="docs-meta"></span>
+          <button class="btn btn-sm" id="docs-close-btn" type="button">Close</button>
         </div>
       </div>
     </div>

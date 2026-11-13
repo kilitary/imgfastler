@@ -39,8 +39,8 @@ run-backend-docker: ## Run the backend in Docker on http://127.0.0.1:$(TEST_PORT
 stop-backend-docker: ## Stop the Docker backend
 	docker compose -f docker-compose.dev.yaml down
 
-dev-ui: ## Serve ui/ on http://127.0.0.1:8000 for browser development
-	cd ui && $(PYTHON) -m http.server 8000
+dev-ui: ## Serve ui/ on http://127.0.0.1:8000 for browser development (no-cache, avoids stale app.js)
+	cd ui && $(PYTHON) $(CURDIR)/scripts/dev_ui_server.py 8000 .
 
 test-backend: ## Smoke test the API served by `make run-backend` (uses python3 only)
 	python3 scripts/smoke.py http://127.0.0.1:$(TEST_PORT)
@@ -49,6 +49,21 @@ check: ## Syntax check backend + frontend
 	$(PYTHON) -m py_compile backend/server.py
 	@command -v node >/dev/null && node --check ui/app.js || true
 	@$(PYTHON) -m json.tool metadata.json > /dev/null && echo "metadata.json: OK"
+
+test: ## Run unit tests (backend/tests, no Docker daemon needed)
+	@if $(PYTHON) -c "import pydantic_core, fastapi, docker, httpx" 2>/dev/null; then \
+		$(PYTHON) -m pytest backend/tests; \
+	elif [ -x "$(HOME)/.venvs/imgfastler/bin/python" ]; then \
+		echo "note: project .venv cannot import compiled extensions (see SETUP.md);" \
+			"using $(HOME)/.venvs/imgfastler instead"; \
+		$(HOME)/.venvs/imgfastler/bin/python -m pytest backend/tests; \
+	else \
+		echo "error: $(PYTHON) cannot import the backend dependencies." >&2; \
+		echo "  On restricted mounts (noexec) create a dev venv outside the project:" >&2; \
+		echo "  python3 -m venv --system-site-packages ~/.venvs/imgfastler" >&2; \
+		echo "  ~/.venvs/imgfastler/bin/pip install pytest docker httpx" >&2; \
+		exit 2; \
+	fi
 
 lint: ## Run linters on backend code
 	@command -v ruff >/dev/null && ruff check backend/ || echo "ruff not installed; install with: pip install ruff"
@@ -66,4 +81,5 @@ prepare-buildx: ## Create a buildx builder for multi-arch builds, if it does not
 	docker buildx inspect $(BUILDER) || docker buildx create --name=$(BUILDER) --driver=docker-container --driver-opt=network=host
 
 .PHONY: help build-extension install-extension update-extension uninstall-extension \
-	inspect-extension run-backend run-backend-docker stop-backend-docker dev-ui test-backend check lint format lint-fix push-extension prepare-buildx
+	inspect-extension run-backend run-backend-docker stop-backend-docker dev-ui test-backend \
+	test check lint format lint-fix push-extension prepare-buildx

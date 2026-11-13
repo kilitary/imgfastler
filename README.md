@@ -82,6 +82,8 @@ development TCP port).
 | -------- | ------------------------------------------ | ------------------------------------------------------------ |
 | `GET`    | `/api/health`                              | backend + engine version/status                              |
 | `GET`    | `/api/images`                              | local images (tags, id, size, created, usage)                |
+| `GET`    | `/api/images/{name}/layers`                | image layer history (created_by, size, tags)                 |
+| `GET`    | `/api/images/{name}/documentation`         | image README from Docker Hub (Markdown)                      |
 | `DELETE` | `/api/images/{name}`                       | remove an image (`?force=true`)                              |
 | `GET`    | `/api/networks`                            | networks (driver, subnet, containers, container count)       |
 | `GET`    | `/api/volumes`                             | volumes (name, driver, mountpoint, created)                  |

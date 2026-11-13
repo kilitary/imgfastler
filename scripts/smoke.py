@@ -23,6 +23,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("API_BASE", "http://127.0.0.1:8099")
 
@@ -90,6 +91,23 @@ def main() -> int:
 
     images = request("GET", "/api/images")
     expect(len(images) > 0, f"{len(images)} image(s) listed")
+
+    layers = request("GET", f"/api/images/{quote(image, safe='')}/layers")
+    expect(layers.get("layer_count", 0) > 0, f"{layers.get('layer_count')} filesystem layer(s) for {image}")
+
+    docs_requested = quote(image, safe='')
+    try:
+        documentation = request("GET", f"/api/images/{docs_requested}/documentation")
+        expect(
+            len(str(documentation.get("markdown") or "")) > 0,
+            f"Docker Hub documentation loaded for {image} ({len(documentation.get('markdown'))} chars)",
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            step(f"Docker Hub has no page for {image} (skipped)")
+        else:
+            failures.append(f"documentation for {image}: HTTP {exc.code}")
+            print(f"  ! FAILED: documentation for {image}: HTTP {exc.code}", flush=True)
 
     networks = request("GET", "/api/networks")
     names = [network["name"] for network in networks]

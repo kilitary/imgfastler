@@ -42,7 +42,7 @@
     connectionsContainerId: null,
     connectionsContainer: null,
     connectionsData: null,
-    connectionsResolveIPs: false,
+    connectionsResolveIPs: true,
     connectionsResolvedIPs: {},
     connectionsResolvingIPs: false,
     busy: false,
@@ -159,6 +159,177 @@
       (character) => HTML_ESCAPE_MAP[character],
     );
 
+  /* --------------------------- markdown rendering --------------------------- */
+
+  // Minimal, hardened Markdown renderer for Docker Hub README content.
+  // All input is HTML-escaped first; links/images only accept http(s) URLs.
+  function renderMarkdown(source) {
+    const text = String(source === null || source === undefined ? '' : source)
+      .replace(/\r\n?/g, '\n');
+
+    // Pull fenced code blocks out first so their content is never parsed.
+    const codeBlocks = [];
+    const staged = text.replace(/```[^\n]*\n?([\s\S]*?)```/g, (match, code) => {
+      codeBlocks.push(`<pre class="docs-code"><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
+      return `\n\u0000${codeBlocks.length - 1}\u0000\n`;
+    });
+
+    const html = [];
+    let paragraph = [];
+    let blockquote = [];
+    let list = null;      // { tag: 'ul' | 'ol' }
+    let listOpen = false; // an <li> is currently open
+    let table = null;     // { head: string[], rows: string[][] }
+
+    const inline = (value) => formatDocsInline(value);
+
+    const flushParagraph = () => {
+      if (paragraph.length) {
+        html.push(`<p>${inline(paragraph.join(' '))}</p>`);
+        paragraph = [];
+      }
+    };
+    const flushBlockquote = () => {
+      if (blockquote.length) {
+        html.push(`<blockquote>${blockquote.map((line) => `<p>${inline(line)}</p>`).join('')}</blockquote>`);
+        blockquote = [];
+      }
+    };
+    const flushList = () => {
+      if (list) {
+        if (listOpen) html.push('</li>');
+        html.push(`</${list.tag}>`);
+        list = null;
+        listOpen = false;
+      }
+    };
+    const flushTable = () => {
+      if (!table) return;
+      const head = table.head;
+      const body = table.rows
+        .map((cells) => `<tr>${head.map((cell, index) => `<td>${inline(cells[index] || '')}</td>`).join('')}</tr>`)
+        .join('');
+      html.push(
+        `<table><thead><tr>${head.map((cell) => `<th>${inline(cell)}</th>`).join('')}</tr></thead>` +
+        (body ? `<tbody>${body}</tbody>` : '') +
+        '</table>',
+      );
+      table = null;
+    };
+    const flush = () => {
+      flushParagraph();
+      flushBlockquote();
+      flushList();
+      flushTable();
+    };
+
+    for (const rawLine of staged.split('\n')) {
+      const line = rawLine.trimEnd();
+      const codeRef = line.match(/^\u0000(\d+)\u0000$/);
+
+      if (codeRef) {
+        flush();
+        html.push(codeBlocks[Number(codeRef[1])]);
+        continue;
+      }
+      if (!line.trim()) {
+        flush();
+        continue;
+      }
+
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        flush();
+        const level = heading[1].length;
+        html.push(`<h${level}>${inline(heading[2].replace(/#+\s*$/, ''))}</h${level}>`);
+        continue;
+      }
+
+      if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+        flush();
+        html.push('<hr>');
+        continue;
+      }
+
+      const quote = line.match(/^>\s?(.*)$/);
+      if (quote) {
+        flushParagraph();
+        flushList();
+        flushTable();
+        blockquote.push(quote[1]);
+        continue;
+      }
+
+      const listItem = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+      if (listItem) {
+        flushParagraph();
+        flushBlockquote();
+        flushTable();
+        const tag = /[-*+]/.test(listItem[2]) ? 'ul' : 'ol';
+        if (!list || list.tag !== tag) {
+          flushList();
+          list = { tag };
+          html.push(`<${tag}>`);
+        }
+        if (listOpen) html.push('</li>');
+        html.push(`<li>${inline(listItem[3])}`);
+        listOpen = true;
+        continue;
+      }
+
+      if (/^\s*\|.*\|\s*$/.test(line)) {
+        flushParagraph();
+        flushBlockquote();
+        flushList();
+        const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+        const isSeparator = cells.every((cell) => cell === '' || /^:?-{3,}:?$/.test(cell));
+        if (!table) {
+          table = { head: cells, rows: [] };
+        } else if (!isSeparator) {
+          table.rows.push(cells);
+        } else if (!table.rows.length && !table.head.length) {
+          table = null; // orphan separator without a header row
+        }
+        continue;
+      }
+
+      flushBlockquote();
+      flushList();
+      flushTable();
+      paragraph.push(line.trim());
+    }
+
+    flush();
+    return html.join('\n');
+  }
+
+  function formatDocsInline(value) {
+    let parsed = escapeHtml(String(value === null || value === undefined ? '' : value));
+    // Images ![alt](https://...)
+    parsed = parsed.replace(
+      /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
+      (match, alt, url) =>
+        `<img src="${url}" alt="${alt || ''}" loading="lazy" decoding="async">`,
+    );
+    // Links [text](https://...)
+    parsed = parsed.replace(
+      /\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
+      (match, label, url) =>
+        `<a href="${url}" target="_blank" rel="noopener noreferrer">${label || url}</a>`,
+    );
+    // Bare URLs (only outside existing href="..." attributes)
+    parsed = parsed.replace(
+      /(^|[\s(>])(https?:\/\/[^\s)<]+)/g,
+      (match, prefix, url) =>
+        `${prefix}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`,
+    );
+    // Inline code, then bold/italic.
+    parsed = parsed.replace(/`([^`]+)`/g, (match, code) => `<code>${code}</code>`);
+    parsed = parsed.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    parsed = parsed.replace(/(^|\W)\*([^*]+)\*(?=\W|$)/g, '$1<em>$2</em>');
+    return parsed;
+  }
+
   function formatBytes(bytes) {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     let value = Number(bytes) || 0;
@@ -167,7 +338,7 @@
       value /= 1024;
       unit += 1;
     }
-    return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+    return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)}\u00A0${units[unit]}`;
   }
 
   function timeAgo(epochSeconds) {
@@ -286,6 +457,7 @@
             <td>${image.in_use > 0 ? `${image.in_use} container(s)` : '<span class="muted">—</span>'}</td>
             <td class="col-actions">
               <button class="btn btn-sm btn-primary" data-action="run" type="button">Run</button>
+              <button class="btn btn-sm" data-action="layers" type="button">Layers</button>
               <button class="btn btn-sm btn-danger" data-action="remove-image" type="button">Delete</button>
             </td>
           </tr>`;
@@ -429,7 +601,7 @@
         <option value="tcp"${protocol === 'tcp' ? ' selected' : ''}>tcp</option>
         <option value="udp"${protocol === 'udp' ? ' selected' : ''}>udp</option>
       </select>
-      <input class="port-ip mono" type="text" placeholder="0.0.0.0" aria-label="Host IP" autocomplete="off" value="${escapeHtml(hostIp)}" />
+      <input class="port-ip mono" type="text" placeholder="0.0.0.0" aria-label="Host IP" autocomplete="off" spellcheck="false" value="${escapeHtml(hostIp)}" />
       <button class="row-remove" type="button" title="Remove port" aria-label="Remove port">×</button>`;
     removeButton(row);
     $('#port-rows').appendChild(row);
@@ -439,25 +611,12 @@
   function addMountRow(type = 'bind', source = '', target = '', readOnly = false) {
     const row = document.createElement('div');
     row.className = 'row mount';
-    const existingVolumeOptions = state.volumes
-      .map((volume) => `<option value="${escapeHtml(volume.name)}">${escapeHtml(volume.name)}</option>`)
-      .join('');
-    const volumeOptions = existingVolumeOptions
-      ? `${existingVolumeOptions}<option value="__new__">New volume…</option>`
-      : '<option value="__new__">New volume…</option><option disabled>No volumes</option>';
-    const isVolume = (type || '').toLowerCase() === 'volume';
-    const sourceHtml = isVolume
-      ? `
-        <select class="mount-source volume-select" aria-label="Mount source">${volumeOptions}</select>
-        <input class="mount-source-new mono" type="text" placeholder="new volume name" aria-label="New volume name" autocomplete="off" style="display:none" />
-      `
-      : `<input class="mount-source mono" type="text" placeholder="/host/path" aria-label="Mount source" autocomplete="off" value="${escapeHtml(source)}" />`;
     row.innerHTML = `
       <select class="mount-type" aria-label="Mount type">
         <option value="bind"${(type || '').toLowerCase() === 'bind' ? ' selected' : ''}>bind</option>
-        <option value="volume"${isVolume ? ' selected' : ''}>volume</option>
+        <option value="volume"${(type || '').toLowerCase() === 'volume' ? ' selected' : ''}>volume</option>
       </select>
-      ${sourceHtml}
+      <div class="mount-source-slot"></div>
       <input class="mount-target mono" type="text" placeholder="/container/path" aria-label="Mount target" autocomplete="off" value="${escapeHtml(target)}" />
       <label><input class="mount-readonly" type="checkbox" aria-label="Read only mount" /> read-only</label>
       <button class="row-remove" type="button" title="Remove mount" aria-label="Remove mount">×</button>`;
@@ -469,86 +628,81 @@
     }
 
     const typeSelect = row.querySelector('.mount-type');
-    const sourceSelect = row.querySelector('.volume-select');
-    const sourceInput = row.querySelector('.mount-source-new');
-    const bindInput = row.querySelector('.mount-source:not(.volume-select)');
+    const slot = row.querySelector('.mount-source-slot');
+    const isVolume = (type || '').toLowerCase() === 'volume';
 
-    function showVolumeControls() {
-      if (sourceSelect) sourceSelect.style.display = '';
-      if (sourceInput) sourceInput.style.display = 'none';
-      if (bindInput) bindInput.style.display = 'none';
-    }
+    const volumeOptionsHtml = () => {
+      const existing = state.volumes
+        .map((volume) => `<option value="${escapeHtml(volume.name)}">${escapeHtml(volume.name)}</option>`)
+        .join('');
+      return existing
+        ? `${existing}<option value="__new__">New volume…</option>`
+        : '<option value="__new__">New volume…</option><option disabled>No volumes</option>';
+    };
 
-    function showBindControls() {
-      if (sourceSelect) sourceSelect.style.display = 'none';
-      if (sourceInput) sourceInput.style.display = 'none';
-      if (bindInput) bindInput.style.display = '';
-    }
-
-    if (isVolume) showVolumeControls(); else showBindControls();
-
-    function attachVolumeSelectListener(selectElement) {
-      if (!selectElement) return;
-      selectElement.addEventListener('change', () => {
-        const newInput = row.querySelector('.mount-source-new');
-        if (selectElement.value === '__new__') {
-          newInput.value = '';
-          newInput.style.display = '';
-          newInput.focus();
-        } else {
-          newInput.style.display = 'none';
+    // Render exactly one source control in the slot:
+    // 'bind' → text input, 'volume' → dropdown of existing volumes,
+    // 'new' → text input for a volume name (the dropdown mutates into this).
+    function renderSource(kind, value = '', focus = false) {
+      let control;
+      if (kind === 'volume') {
+        const select = document.createElement('select');
+        select.className = 'mount-source volume-select';
+        select.setAttribute('aria-label', 'Mount source');
+        select.innerHTML = volumeOptionsHtml();
+        if (value) {
+          select.value = value;
+          // Prefilled volume that is not in the list → let the user type it.
+          if (select.value !== value) {
+            renderSource('new', value, focus);
+            return;
+          }
         }
-      });
+        select.addEventListener('change', () => {
+          if (select.value === '__new__') {
+            renderSource('new', '', true);
+          }
+        });
+        control = select;
+      } else if (kind === 'new') {
+        const input = document.createElement('input');
+        input.className = 'mount-source-new mono';
+        input.type = 'text';
+        input.placeholder = 'new volume name';
+        input.setAttribute('aria-label', 'New volume name');
+        input.autocomplete = 'off';
+        input.spellcheck = false;
+        input.value = value;
+        // Leave the field empty and blurred to get the volume list back.
+        input.addEventListener('blur', () => {
+          if (!input.value) renderSource('volume', '', false);
+        });
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape' && !input.value) renderSource('volume', '', false);
+        });
+        control = input;
+      } else {
+        const input = document.createElement('input');
+        input.className = 'mount-source mono';
+        input.type = 'text';
+        input.placeholder = '/host/path';
+        input.setAttribute('aria-label', 'Mount source');
+        input.autocomplete = 'off';
+        input.value = value;
+        control = input;
+      }
+      slot.innerHTML = '';
+      slot.appendChild(control);
+      if (focus) control.focus();
     }
 
     typeSelect.addEventListener('change', () => {
-      const nowVolume = typeSelect.value === 'volume';
-      const currentSelect = row.querySelector('.volume-select');
-      const currentBind = row.querySelector('.mount-source:not(.volume-select)');
-      if (nowVolume) {
-        // Rebuild volume select with latest state.volumes
-        const existingVolumeOptions = state.volumes
-          .map((volume) => `<option value="${escapeHtml(volume.name)}">${escapeHtml(volume.name)}</option>`)
-          .join('');
-        const volumeOptions = existingVolumeOptions
-          ? `${existingVolumeOptions}<option value="__new__">New volume…</option>`
-          : '<option value="__new__">New volume…</option><option disabled>No volumes</option>';
-        if (!currentSelect) {
-          const select = document.createElement('select');
-          select.className = 'mount-source volume-select';
-          select.ariaLabel = 'Mount source';
-          select.innerHTML = volumeOptions;
-          currentBind.replaceWith(select);
-          attachVolumeSelectListener(select);
-        } else {
-          currentSelect.innerHTML = volumeOptions;
-          attachVolumeSelectListener(currentSelect);
-        }
-        showVolumeControls();
-      } else {
-        if (currentSelect) currentSelect.replaceWith(
-          Object.assign(document.createElement('input'), {
-            className: 'mount-source mono',
-            type: 'text',
-            placeholder: '/host/path',
-            ariaLabel: 'Mount source',
-            autocomplete: 'off',
-            value: '',
-          })
-        );
-        showBindControls();
-      }
+      renderSource(typeSelect.value === 'volume' ? 'volume' : 'bind', '', false);
     });
-
-    attachVolumeSelectListener(sourceSelect);
 
     removeButton(row);
     $('#mount-rows').appendChild(row);
-    if (!source) {
-      if (isVolume && sourceSelect) sourceSelect.focus();
-      else if (bindInput) bindInput.focus();
-      else sourceInput.focus();
-    }
+    renderSource(isVolume ? 'volume' : 'bind', source, !source);
   }
 
   async function loadNetworks() {
@@ -590,17 +744,23 @@
         const meta = [network.driver, network.subnet].filter(Boolean).join(' · ');
         const containerText = connected.length
           ? connected.map((c) => `${escapeHtml(c.name)} (${escapeHtml(c.state)})`).join(', ')
-          : '<span class="muted">none</span>';
+          : '<span class="muted">no containers</span>';
         return `<div class="network-usage-row">
           <div class="cell-title">${escapeHtml(network.name)} <span class="muted">${escapeHtml(meta)}</span></div>
-          <div class="muted">Connected containers: ${containerText}</div>
+          <div class="network-usage-containers">${containerText}</div>
         </div>`;
       });
       container.innerHTML = rows.length ? rows.join('') : '<span class="muted">No networks found.</span>';
+      const summary = $('#network-usage-summary');
+      if (summary) {
+        summary.textContent = `${networks.length} network(s) — expand to see which containers use them`;
+      }
     } catch (error) {
       container.innerHTML = `<span class="muted">Could not load network usage: ${escapeHtml(
         errorMessage(error),
       )}</span>`;
+      const summary = $('#network-usage-summary');
+      if (summary) summary.textContent = 'Network usage — unavailable';
     }
   }
 
@@ -929,20 +1089,25 @@
     const mountTargets = new Set();
     $$('#mount-rows .row').forEach((row) => {
       const type = row.querySelector('.mount-type').value;
+      const bindInput = row.querySelector('.mount-source:not(.volume-select)');
       const volumeSelect = row.querySelector('.volume-select');
       const newVolumeInput = row.querySelector('.mount-source-new');
-      const bindInput = row.querySelector('.mount-source:not(.volume-select)');
 
       let source;
       if (type.toLowerCase() === 'volume') {
-        if (volumeSelect && volumeSelect.value === '__new__') {
+        // Exactly one of the two controls is present: a text input for a
+        // fresh volume name, or the dropdown of existing volumes.
+        if (newVolumeInput) {
           source = newVolumeInput.value.trim();
           if (!source) {
             errors.push('New volume name is required');
             return;
           }
+        } else if (volumeSelect && volumeSelect.value === '__new__') {
+          errors.push('New volume name is required');
+          return;
         } else {
-          source = volumeSelect ? volumeSelect.value.trim() : bindInput.value.trim();
+          source = volumeSelect ? volumeSelect.value.trim() : '';
         }
       } else {
         source = bindInput.value.trim();
@@ -1010,7 +1175,7 @@
       }
       const created = await api('post', '/api/containers', spec);
       const label = created.name || created.short_id || 'container';
-      toast('success', `Container '${label}' ${state.editContainerId ? 'recreated' : 'started'}`);
+      toast('success', `Container “${label}” ${state.editContainerId ? 'recreated' : 'started'}`);
       (created.warnings || []).forEach((warning) => toast('error', warning));
       // Inform about networks that already have containers connected.
       (created.networks || []).forEach((network) => {
@@ -1018,7 +1183,7 @@
           .map((c) => c.name || c.id)
           .filter(Boolean);
         if (connected.length) {
-          toast('info', `Network '${network.name}' already has containers: ${connected.join(', ')}`);
+          toast('info', `Network “${network.name}” already has containers: ${connected.join(', ')}`);
         }
       });
       showView('containers');
@@ -1152,6 +1317,107 @@
       if (button) delete button.dataset.armed;
       showError(error);
     }
+  }
+
+  /* ------------------------------- layers ------------------------------- */
+
+  function renderLayers(image) {
+    const list = $('#layers-list');
+    const layers = image.layers || [];
+    if (!layers.length) {
+      list.innerHTML = '<div class="empty"><p class="empty-title">No layer history available</p></div>';
+      return;
+    }
+
+    // Show newest layer first (the API list is oldest first).
+    const entries = layers.slice().reverse();
+    list.innerHTML = entries
+      .map((layer, index) => {
+        const position = entries.length - index; // 1 = oldest layer
+        const isFsLayer = layer.size > 0;
+        const command = layer.created_by
+          ? escapeHtml(layer.created_by)
+          : `<span class="muted">${layer.comment ? escapeHtml(layer.comment) : '—'}</span>`;
+        const tags = (layer.tags || [])
+          .map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`)
+          .join('');
+        return `
+          <div class="layer-entry">
+            <span class="layer-index mono" title="Layer ${position} of ${entries.length}">#${position}</span>
+            <div class="layer-main">
+              <div class="layer-command mono">${command}${tags ? ` ${tags}` : ''}</div>
+              <div class="muted">${isFsLayer ? formatBytes(layer.size) : 'metadata (no filesystem change)'} · ${timeAgo(layer.created)}</div>
+            </div>
+          </div>`;
+      })
+      .join('');
+  }
+
+  async function openLayers(image) {
+    const ref = imageRef(image);
+    $('#layers-title').textContent = `Layers — ${imageLabel(image)}`;
+    $('#layers-info').textContent = '';
+    $('#layers-list').innerHTML = '<div class="muted">Loading layers…</div>';
+    $('#layers-status').textContent = '';
+    $('#layers-modal').classList.remove('hidden');
+
+    try {
+      const data = await api('get', `/api/images/${encodeURIComponent(ref)}/layers`);
+      $('#layers-info').textContent =
+        `${data.layer_count} filesystem layer(s) · total size ${formatBytes(data.size)}`;
+      renderLayers(data);
+      $('#layers-status').textContent = `${(data.layers || []).length} history entries`;
+    } catch (error) {
+      $('#layers-list').innerHTML = '';
+      $('#layers-status').textContent = 'Error';
+      $('#layers-modal').classList.add('hidden');
+      showError(error);
+    }
+  }
+
+  function closeLayers() {
+    $('#layers-modal').classList.add('hidden');
+  }
+
+  /* ------------------------------- docs --------------------------------- */
+
+  let docsRequestId = 0;
+
+  async function openDocs() {
+    if (!state.image) return;
+    const requestId = ++docsRequestId;
+    const ref = imageRef(state.image);
+
+    $('#docs-title').textContent = `Documentation — ${imageLabel(state.image)}`;
+    $('#docs-body').innerHTML = '<div class="muted">Loading documentation from Docker Hub…</div>';
+    $('#docs-meta').textContent = '';
+    $('#docs-hub-link').classList.add('hidden');
+    $('#docs-hub-link').href = '#';
+    $('#docs-modal').classList.remove('hidden');
+
+    try {
+      const data = await api('get', `/api/images/${encodeURIComponent(ref)}/documentation`);
+      if (requestId !== docsRequestId) return; // modal was closed meanwhile
+      $('#docs-body').innerHTML = renderMarkdown(data.markdown);
+      $('#docs-hub-link').href = data.url;
+      $('#docs-hub-link').classList.remove('hidden');
+      const meta = [];
+      if (data.official) meta.push('Official image');
+      if (data.pull_count) meta.push(`${Number(data.pull_count).toLocaleString()} pulls`);
+      if (data.last_updated) meta.push(`updated ${new Date(data.last_updated).toLocaleDateString()}`);
+      $('#docs-meta').textContent = meta.join(' · ');
+    } catch (error) {
+      if (requestId !== docsRequestId) return;
+      $('#docs-body').innerHTML =
+        `<div class="empty"><p class="empty-title">${escapeHtml(errorMessage(error))}</p>` +
+        '<p class="muted">Documentation is fetched from Docker Hub and needs a named image.</p></div>';
+      $('#docs-meta').textContent = 'Error';
+    }
+  }
+
+  function closeDocs() {
+    docsRequestId += 1;
+    $('#docs-modal').classList.add('hidden');
   }
 
   /* ------------------------------- logs -------------------------------- */
@@ -1298,6 +1564,10 @@
         if (image) openCreate(image);
         return;
       }
+      if (button.dataset.action === 'layers') {
+        if (image) openLayers(image);
+        return;
+      }
       if (button.dataset.action === 'remove-image') {
         if (image) deleteImage(image, button);
         return;
@@ -1389,6 +1659,25 @@
     $('#add-mount').addEventListener('click', () => addMountRow());
     $('#log-close').addEventListener('click', closeLogs);
     $('#log-follow-btn').addEventListener('click', () => setLogsFollow(!logsFollow));
+    $('#layers-close').addEventListener('click', closeLayers);
+    $('#layers-modal').addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) closeLayers();
+    });
+    $('#docs-btn').addEventListener('click', openDocs);
+    $('#docs-close').addEventListener('click', closeDocs);
+    $('#docs-close-btn').addEventListener('click', closeDocs);
+    $('#docs-modal').addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) closeDocs();
+    });
+
+    // Escape closes whichever modal is currently open.
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      const open = document.querySelector('.modal-backdrop:not(.hidden)');
+      if (!open) return;
+      const closer = open.querySelector('button[id$="-close"], #docs-close-btn');
+      if (closer) closer.click();
+    });
   }
 
   function markUpdated() {

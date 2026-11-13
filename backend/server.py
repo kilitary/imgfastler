@@ -9,6 +9,8 @@ Endpoints
 ---------
     GET    /api/health                     backend + engine status
     GET    /api/images                     list local images
+    GET    /api/images/{name}/layers       layer history of an image
+    GET    /api/images/{name}/documentation Docker Hub README of an image
     DELETE /api/images/{name}              remove an image
     GET    /api/networks                   list networks
     GET    /api/volumes                    list volume names
@@ -25,19 +27,31 @@ handy while developing the backend on its own.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import random
 import re
 import shlex
 import socket
 import struct
 import subprocess
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Literal
 
 import docker
 import uvicorn
-from docker.errors import APIError, ContainerError, DockerException, ImageNotFound, NotFound
+from docker.errors import (
+    APIError,
+    ContainerError,
+    DockerException,
+    ImageNotFound,
+    NotFound,
+)
 from docker.types import Mount
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -103,7 +117,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
 )
 
-# --- app ---------------------------------------------------------------
+# --- app ---------------------------------------------------------------net
 
 app = FastAPI(title="imgfastler backend", version="1.0.0")
 app.add_middleware(
@@ -336,7 +350,14 @@ def _parse_proc_net(text: str) -> list[dict[str, Any]]:
 
             log.debug(
                 "Parsed connection: local=%s:%s remote=%s:%s state=%s inode=%s uid=%s fields=%d",
-                local_address, local_port, remote_address, remote_port, state_code, inode, uid, len(fields)
+                local_address,
+                local_port,
+                remote_address,
+                remote_port,
+                state_code,
+                inode,
+                uid,
+                len(fields),
             )
 
             connections.append(
@@ -355,7 +376,9 @@ def _parse_proc_net(text: str) -> list[dict[str, Any]]:
                     "rx_queue": rx_queue,
                 }
             )
-            per_file[filename] = per_file.get(filename, 0) + len(connections) - count_before
+            per_file[filename] = (
+                per_file.get(filename, 0) + len(connections) - count_before
+            )
 
     log.debug(
         "parse_proc_net: per-file counts=%s total=%d",
@@ -456,7 +479,9 @@ def _dump_container_sockets(container: Any) -> str:
                 content = result[1].decode("utf-8", "replace") if result[1] else ""
                 output_parts.append(f"__IMFASTLER_{filename}__\n{content}")
             except Exception as e:
-                output_parts.append(f"__IMFASTLER_{filename}__\n# Error reading {path}: {str(e)}")
+                output_parts.append(
+                    f"__IMFASTLER_{filename}__\n# Error reading {path}: {str(e)}"
+                )
 
         return "\n".join(output_parts)
     except Exception as exc:
@@ -519,6 +544,155 @@ def remove_image(name: str, force: bool = False) -> dict[str, Any]:
     except DockerException as exc:
         raise as_http_error(exc) from exc
     return {"removed": removed, "name": name}
+
+
+@app.get("/api/images/{name:path}/layers")
+def image_layers(name: str) -> dict[str, Any]:
+    """Layer history of an image, oldest layer first.
+
+    Entries with size 0 are metadata-only changes (no filesystem layer),
+    so ``layer_count`` counts the entries that actually consume space.
+    """
+    client = get_client()
+    try:
+        image = client.images.get(name)
+        history: list[dict[str, Any]] = image.history()
+    except ImageNotFound as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Image '{name}' not found"
+        ) from exc
+    except DockerException as exc:
+        raise as_http_error(exc) from exc
+
+    entries = []
+    for layer in history:
+        created = layer.get("Created")
+        entries.append(
+            {
+                # The history endpoint reports Unix time; tolerate ISO strings too.
+                "created": created
+                if isinstance(created, int)
+                else _created_timestamp(created),
+                "created_by": layer.get("CreatedBy") or layer.get("created_by") or "",
+                "size": int(layer.get("Size", 0)),
+                "comment": layer.get("Comment") or "",
+                "tags": layer.get("Tags") or [],
+            }
+        )
+    return {
+        "name": name,
+        "id": image.id,
+        "size": (image.attrs or {}).get("Size", 0),
+        "layer_count": sum(1 for entry in entries if entry["size"] > 0),
+        "layers": entries,
+    }
+
+
+# --- docker hub documentation -------------------------------------------
+
+HUB_API_URL = "https://hub.docker.com/v2/repositories"
+DOCS_CACHE_TTL = 3600  # seconds
+MAX_DESCRIPTION_LENGTH = 200_000
+_hub_docs_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _dockerhub_repo(reference: str) -> str | None:
+    """Reduce an image reference (optional tag/digest) to its Docker Hub path.
+
+    Returns None for untagged ids (``sha256:...``) or references that cannot
+    live on Docker Hub (private registry hosts).
+    """
+    reference = reference.strip()
+    if reference.startswith("sha256:"):
+        return None
+    if "@" in reference:
+        reference = reference.split("@", 1)[0]
+
+    # Everything before the first slash is an optional registry host (which may
+    # contain ':' for a port); the repository itself never contains ':'.
+    rest = reference.split("/", 1)[1] if "/" in reference else reference
+    if ":" in rest:
+        rest = rest.rsplit(":", 1)[0]
+    rest = rest.strip("/")
+
+    if not rest:
+        return None
+    # Dot/colon-leading first segments would be registry hosts (e.g.
+    # "localhost:5000/foo", "ghcr.io/org/img") which Docker Hub does not host.
+    first = rest.split("/", 1)[0]
+    if "." in first or ":" in first:
+        return None
+    if "/" not in rest:
+        return f"library/{rest}"  # single-segment names are official images
+    return rest
+
+
+def _fetch_dockerhub_page(repo: str) -> dict[str, Any]:
+    """Get a repository page from Docker Hub (with a small in-memory cache)."""
+    cached = _hub_docs_cache.get(repo)
+    if cached and time.time() - cached[0] < DOCS_CACHE_TTL:
+        return cached[1]
+
+    url = f"{HUB_API_URL}/{repo}/"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise HTTPException(
+                status_code=404, detail=f"No Docker Hub page found for '{repo}'."
+            ) from exc
+        if exc.code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="Docker Hub rate limit reached; try again later.",
+            ) from exc
+        raise HTTPException(
+            status_code=502, detail=f"Docker Hub returned HTTP {exc.code} for '{repo}'."
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Could not reach Docker Hub: {exc}"
+        ) from exc
+
+    full_description = (
+        data.get("full_description") or data.get("description") or ""
+    ).strip()
+    if not full_description:
+        raise HTTPException(
+            status_code=404,
+            detail=f"The Docker Hub page for '{repo}' has no description.",
+        ) from None
+
+    official = bool(data.get("is_official")) or repo.startswith("library/")
+    if repo.startswith("library/"):
+        hub_url = f"https://hub.docker.com/_/{repo.split('/', 1)[1]}"
+    else:
+        hub_url = f"https://hub.docker.com/r/{repo}"
+    result = {
+        "repo": repo,
+        "official": official,
+        "description": (data.get("description") or "").strip(),
+        "markdown": full_description[:MAX_DESCRIPTION_LENGTH],
+        "truncated": len(full_description) > MAX_DESCRIPTION_LENGTH,
+        "last_updated": data.get("last_updated"),
+        "pull_count": data.get("pull_count"),
+        "url": hub_url,
+    }
+    _hub_docs_cache[repo] = (time.time(), result)
+    return result
+
+
+@app.get("/api/images/{name:path}/documentation")
+def image_documentation(name: str) -> dict[str, Any]:
+    """Documentation (README) of an image from Docker Hub, as Markdown."""
+    repo = _dockerhub_repo(name)
+    if not repo:
+        raise HTTPException(
+            status_code=404,
+            detail="Documentation is only available for named Docker Hub images.",
+        )
+    return _fetch_dockerhub_page(repo)
 
 
 @app.get("/api/networks")
@@ -624,6 +798,18 @@ def list_containers(all: bool = True) -> list[dict[str, Any]]:
         host_config = attrs.get("HostConfig", {}) or {}
         network_settings = attrs.get("NetworkSettings", {}) or {}
         mounts = host_config.get("Mounts") or []
+        if not mounts:
+            # Containers created with legacy `-v` binds may only populate the
+            # top-level `Mounts` list, which uses `Destination`/`RW` names.
+            mounts = [
+                {
+                    "Type": m.get("Type", ""),
+                    "Source": m.get("Source", ""),
+                    "Target": m.get("Destination", ""),
+                    "ReadOnly": m.get("RW") is False,
+                }
+                for m in (attrs.get("Mounts") or [])
+            ]
 
         result.append(
             {
@@ -647,7 +833,10 @@ def list_containers(all: bool = True) -> list[dict[str, Any]]:
                     {
                         "type": m.get("Type", ""),
                         "source": m.get("Source", ""),
-                        "target": m.get("Destination", ""),
+                        # `HostConfig.Mounts` entries name the container path
+                        # `Target` (Mounts API); the legacy top-level list
+                        # calls the same field `Destination`. Accept both.
+                        "target": m.get("Target") or m.get("Destination", ""),
                         # Docker reports read-only state as `ReadOnly` in
                         # `HostConfig.Mounts` (the Mounts API imgfastler uses);
                         # `RW` appears in the legacy top-level `Mounts`. Accept both.
@@ -664,27 +853,174 @@ def list_containers(all: bool = True) -> list[dict[str, Any]]:
     return result
 
 
-def _build_ip_name_map(client: Any) -> dict[str, str]:
-    """Map container IP addresses to their container names."""
-    result: dict[str, str] = {}
+IP_NAME_MAP_CACHE_TTL = 5.0  # seconds
+_ip_name_map_cache: tuple[float, dict[str, str]] = (0.0, {})
+
+# Addresses that never belong to a container but appear in /proc/net dumps.
+SPECIAL_IP_LABELS = {
+    "127.0.0.1": "loopback",
+    "::1": "loopback",
+    "127.0.0.11": "docker embedded DNS",
+}
+
+# Public resolvers used as a fallback for reverse (PTR) lookups. Docker
+# Desktop's internal resolver (192.168.65.7) never answers in-addr.arpa
+# queries, so public IPs would stay unresolved inside the backend container.
+# Override with IMGFASTLER_DNS_RESOLVERS="ip,ip" (empty value disables).
+DNS_RESOLVERS = [
+    ip.strip()
+    for ip in os.environ.get("IMGFASTLER_DNS_RESOLVERS", "8.8.8.8,1.1.1.1").split(",")
+    if ip.strip()
+]
+PTR_QUERY_TIMEOUT = 1.2  # seconds per resolver attempt
+PTR_CACHE_TTL_POSITIVE = 600.0  # seconds a resolved PTR stays cached
+PTR_CACHE_TTL_NEGATIVE = 60.0  # seconds a failed lookup is retried after
+_ptr_cache: dict[str, tuple[float, str | None]] = {}
+
+
+def _build_ip_name_map(client: Any, force: bool = False) -> dict[str, str]:
+    """Map container IP addresses and gateways to human-readable names.
+
+    Covers IPv4 and IPv6 addresses of every container (across all attached
+    networks), Docker's per-network gateways (the host side of a bridge) and
+    a few special addresses. Results are cached briefly so the per-IP
+    ``/api/resolve`` calls do not re-scan the container list every time.
+    """
+    global _ip_name_map_cache
+    now = time.time()
+    cached_at, cached_map = _ip_name_map_cache
+    if not force and now - cached_at < IP_NAME_MAP_CACHE_TTL:
+        return cached_map
+
+    result: dict[str, str] = dict(SPECIAL_IP_LABELS)
+
     try:
         for container in client.containers.list(all=True):
             networks = (
-                (container.attrs or {}).get("NetworkSettings", {}) or {}
-            ).get("Networks") or {}
+                ((container.attrs or {}).get("NetworkSettings") or {}).get("Networks")
+            ) or {}
             for network in networks.values():
-                ip_address = (network or {}).get("IPAddress")
-                if ip_address and ip_address not in result:
-                    result[ip_address] = container.name
+                network = network or {}
+                for key in ("IPAddress", "GlobalIPv6Address"):
+                    address = network.get(key)
+                    if address:
+                        result.setdefault(address, container.name)
     except DockerException:
         pass
+
+    try:
+        for network in client.networks.list():
+            attrs = network.attrs or {}
+            for entry in (attrs.get("IPAM") or {}).get("Config") or []:
+                gateway = (
+                    (entry or {}).get("Gateway") if isinstance(entry, dict) else None
+                )
+                if gateway:
+                    result.setdefault(gateway, f"{network.name} (gateway)")
+    except DockerException:
+        pass
+
+    _ip_name_map_cache = (now, result)
     return result
 
 
-def _resolve_ip_address(client: Any, ip: str, ip_name_map: dict[str, str] | None = None) -> str:
+def _decode_dns_name(data: bytes, offset: int) -> tuple[str, int]:
+    """Decode a possibly-compressed DNS name; return (name, next_offset)."""
+    labels: list[str] = []
+    end: int | None = None
+    jumps = 0
+    while True:
+        if offset >= len(data) or jumps > 64:
+            return "", len(data)
+        length = data[offset]
+        if length == 0:
+            offset += 1
+            break
+        if length & 0xC0 == 0xC0:  # compression pointer
+            if offset + 1 >= len(data):
+                return "", len(data)
+            pointer = ((length & 0x3F) << 8) | data[offset + 1]
+            if end is None:
+                end = offset + 2
+            offset = pointer
+            jumps += 1
+            continue
+        offset += 1
+        labels.append(data[offset : offset + length].decode("ascii", "replace"))
+        offset += length
+    return ".".join(labels), (end if end is not None else offset)
+
+
+def _ptr_lookup(ip: str) -> str:
+    """Reverse-resolve an IPv4 address via the fallback DNS resolvers.
+
+    Returns the hostname, or the input IP when nothing resolves. Results are
+    cached so repeated connection-table renders do not re-query the network.
+    """
+    now = time.time()
+    cached = _ptr_cache.get(ip)
+    if cached is not None:
+        cached_at, cached_name = cached
+        ttl = PTR_CACHE_TTL_POSITIVE if cached_name else PTR_CACHE_TTL_NEGATIVE
+        if now - cached_at < ttl:
+            return cached_name or ip
+
+    parts = ip.split(".")
+    if not DNS_RESOLVERS or len(parts) != 4 or not all(
+        part.isdigit() and 0 <= int(part) <= 255 for part in parts
+    ):
+        return ip  # not a plain IPv4 address; nothing to query
+
+    arpa = b"".join(bytes([len(part)]) + part.encode() for part in reversed(parts))
+    question = arpa + b"\x07in-addr\x04arpa\x00"
+    query_id = random.randint(0, 0xFFFF)
+    packet = (
+        struct.pack(">HHHHHH", query_id, 0x0100, 1, 0, 0, 0)
+        + question
+        + struct.pack(">HH", 12, 1)  # qtype=PTR, qclass=IN
+    )
+
+    hostname: str | None = None
+    for server in DNS_RESOLVERS:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(PTR_QUERY_TIMEOUT)
+                sock.sendto(packet, (server, 53))
+                data = sock.recv(4096)
+        except OSError:
+            continue
+        if len(data) < 12 or data[:2] != query_id.to_bytes(2, "big"):
+            continue
+        if data[3] & 0x0F != 0:  # non-zero rcode (NXDOMAIN, SERVFAIL, ...)
+            continue
+        answers = struct.unpack(">H", data[6:8])[0]
+        if answers < 1:
+            continue
+        # Answer record: owner name (usually a pointer), TYPE, CLASS, TTL,
+        # RDLENGTH, then the RDATA holding the PTR target hostname.
+        _, offset = _decode_dns_name(data, 12 + len(question) + 4)
+        if offset + 10 > len(data):
+            continue
+        rdlength = struct.unpack(">H", data[offset + 8 : offset + 10])[0]
+        if rdlength < 1 or offset + 10 + rdlength > len(data):
+            continue
+        name, _ = _decode_dns_name(data, offset + 10)
+        if name and not name.endswith(".in-addr.arpa"):
+            hostname = name
+            break
+
+    _ptr_cache[ip] = (now, hostname)
+    return hostname or ip
+
+
+def _resolve_ip_address(
+    client: Any, ip: str, ip_name_map: dict[str, str] | None = None
+) -> str:
     """Resolve an IP address to a human-readable name on the backend."""
-    if not ip or ip in {"0.0.0.0", "::", "::1"}:
+    if not ip or ip in {"0.0.0.0", "::"}:
         return ip
+    if ip in SPECIAL_IP_LABELS:
+        return SPECIAL_IP_LABELS[ip]
     if ip_name_map is None:
         try:
             ip_name_map = _build_ip_name_map(client)
@@ -699,7 +1035,7 @@ def _resolve_ip_address(client: Any, ip: str, ip_name_map: dict[str, str] | None
             return hostname
     except (socket.herror, socket.gaierror, OSError):
         pass
-    return ip
+    return _ptr_lookup(ip)
 
 
 @app.get("/api/containers/{container_id}/connections")
@@ -710,8 +1046,11 @@ def container_connections(
     resolve_ip: bool = False,
     resolved: bool = False,
 ) -> dict[str, Any]:
-    """List all TCP/UDP sockets in a container's network namespace."""
-    do_resolve = resolve or resolve_ips or resolve_ip or resolved
+    """List all TCP/UDP sockets in a container's network namespace.
+
+    Addresses are always resolved server-side (resolve/resolve_ips/... are
+    legacy aliases, kept so older UIs keep working with this API).
+    """
     client = get_client()
     try:
         container = client.containers.get(container_id)
@@ -769,9 +1108,34 @@ def container_connections(
     )
     connections = _parse_proc_net(raw_output)
     ip_name_map = _build_ip_name_map(client)
+    # Resolve every unique address in parallel: the PTR fallback waits up to
+    # PTR_QUERY_TIMEOUT per resolver, which must not be paid per connection.
+    unique_addresses = {
+        address
+        for connection in connections
+        for address in (connection["local_address"], connection["remote_address"])
+        if address and address not in {"0.0.0.0", "::"}
+    }
+    resolved: dict[str, str] = {}
+    if unique_addresses:
+        ordered = sorted(unique_addresses)
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            for address, name in zip(
+                ordered,
+                pool.map(
+                    lambda ip: _resolve_ip_address(client, ip, ip_name_map),
+                    ordered,
+                ),
+                strict=True,
+            ):
+                resolved[address] = name
     for connection in connections:
-        connection["local_resolved"] = _resolve_ip_address(client, connection["local_address"], ip_name_map)
-        connection["remote_resolved"] = _resolve_ip_address(client, connection["remote_address"], ip_name_map)
+        connection["local_resolved"] = resolved.get(
+            connection["local_address"], connection["local_address"]
+        )
+        connection["remote_resolved"] = resolved.get(
+            connection["remote_address"], connection["remote_address"]
+        )
     log.info(
         "container_connections: %s -> %d connections",
         container_id,
@@ -791,9 +1155,7 @@ def container_connections(
         "ipv4": sum(1 for item in connections if item["family"] == "ipv4"),
         "ipv6": sum(1 for item in connections if item["family"] == "ipv6"),
         "listening": sum(1 for item in connections if item["state"] == "LISTEN"),
-        "established": sum(
-            1 for item in connections if item["state"] == "ESTABLISHED"
-        ),
+        "established": sum(1 for item in connections if item["state"] == "ESTABLISHED"),
     }
 
     return {
@@ -998,7 +1360,9 @@ def remove_container(container_id: str, force: bool = True) -> dict[str, Any]:
 
 
 @app.get("/api/containers/{container_id}/logs")
-async def container_logs(container_id: str, follow: bool = False, tail: int | None = None) -> Any:
+async def container_logs(
+    container_id: str, follow: bool = False, tail: int | None = None
+) -> Any:
     """Return container logs; `follow=true` streams new output as SSE; `tail=N` limits to last N lines."""
     try:
         container = get_client().containers.get(container_id)
@@ -1032,7 +1396,14 @@ async def container_logs(container_id: str, follow: bool = False, tail: int | No
 
 
 @app.post("/api/containers/{container_id}/connections/kill")
-def kill_connection(container_id: str, inode: int, local_address: str | None = None, local_port: int | None = None, remote_address: str | None = None, remote_port: int | None = None) -> dict[str, Any]:
+def kill_connection(
+    container_id: str,
+    inode: int,
+    local_address: str | None = None,
+    local_port: int | None = None,
+    remote_address: str | None = None,
+    remote_port: int | None = None,
+) -> dict[str, Any]:
     """Kill a network connection on the host system using ss -K."""
     try:
         container = get_client().containers.get(container_id)
@@ -1049,12 +1420,15 @@ def kill_connection(container_id: str, inode: int, local_address: str | None = N
                 ss -tuna | grep "inode={inode}" || echo "Not found"
             fi
             """
-            conn_output = container.exec_run(["/bin/sh", "-c", get_conn_script], privileged=True)
+            conn_output = container.exec_run(
+                ["/bin/sh", "-c", get_conn_script], privileged=True
+            )
             conn_text = conn_output[1].decode("utf-8", "replace")
             debug_info.append(f"Connection details: {conn_text}")
 
             # Parse connection details
             import re
+
             match = re.search(r"(\S+):(\d+)\s+(\S+):(\d+)", conn_text)
             if match:
                 local_address, local_port, remote_address, remote_port = match.groups()
@@ -1067,24 +1441,26 @@ def kill_connection(container_id: str, inode: int, local_address: str | None = N
                 "inode": inode,
                 "killed": False,
                 "debug": debug_info,
-                "message": "Could not determine connection details"
+                "message": "Could not determine connection details",
             }
 
         # Try to kill connection using socket-level methods only (no process killing)
-        debug_info.append(f"=== Attempting inter-container kill for {local_address}:{local_port} -> {remote_address}:{remote_port} (inode: {inode}) ===")
+        debug_info.append(
+            f"=== Attempting inter-container kill for {local_address}:{local_port} -> {remote_address}:{remote_port} (inode: {inode}) ==="
+        )
 
         try:
             # Convert IP addresses to hex format for /proc/net/tcp
             def ip_to_hex(ip: str) -> str:
-                parts = ip.split('.')
+                parts = ip.split(".")
                 if len(parts) == 4:
-                    return ''.join(f'{int(p):02X}' for p in reversed(parts))
+                    return "".join(f"{int(p):02X}" for p in reversed(parts))
                 return ip
 
             local_hex = ip_to_hex(local_address)
             remote_hex = ip_to_hex(remote_address)
-            local_port_hex = f'{local_port:04X}'
-            remote_port_hex = f'{remote_port:04X}'
+            local_port_hex = f"{local_port:04X}"
+            remote_port_hex = f"{remote_port:04X}"
 
             # Method 1: Find connection in /proc/net/tcp and get its inode
             find_conn_cmd = f"""
@@ -1096,7 +1472,9 @@ def kill_connection(container_id: str, inode: int, local_address: str | None = N
             grep "{local_hex}" /proc/net/tcp | grep "{local_port_hex}" || \
             grep "{remote_hex}" /proc/net/tcp | grep "{remote_port_hex}"
             """
-            result = container.exec_run(["/bin/sh", "-c", find_conn_cmd], privileged=True)
+            result = container.exec_run(
+                ["/bin/sh", "-c", find_conn_cmd], privileged=True
+            )
             conn_output = result[1].decode("utf-8", "replace") if result[1] else ""
             debug_info.append(f"Connection search output:\n{conn_output}")
 
@@ -1104,18 +1482,23 @@ def kill_connection(container_id: str, inode: int, local_address: str | None = N
             actual_inode = None
             if conn_output.strip():
                 import re
+
                 # Split by whitespace and get field 9 (0-indexed) which is the inode
-                lines = conn_output.strip().split('\n')
+                lines = conn_output.strip().split("\n")
                 for line in lines:
                     fields = line.split()
                     if len(fields) > 9:
                         # Field 9 is the inode in /proc/net/tcp format
                         actual_inode = fields[9]
-                        debug_info.append(f"Found actual inode: {actual_inode} from line: {line}")
+                        debug_info.append(
+                            f"Found actual inode: {actual_inode} from line: {line}"
+                        )
                         break
 
             # Method 2: Try ss -K if available (socket-level kill)
-            ss_check = container.exec_run(["sh", "-c", "command -v ss || echo 'ss not found'"], privileged=True)
+            ss_check = container.exec_run(
+                ["sh", "-c", "command -v ss || echo 'ss not found'"], privileged=True
+            )
             ss_available = ss_check[1].decode("utf-8", "replace").strip()
             debug_info.append(f"ss check: {ss_available}")
 
@@ -1127,7 +1510,9 @@ def kill_connection(container_id: str, inode: int, local_address: str | None = N
                     f'ss -K "local {local_address}:{local_port} peer {remote_address}:{remote_port}"',
                 ]
                 for i, cmd in enumerate(ss_cmds, 1):
-                    result = container.exec_run(["/bin/sh", "-c", f"{cmd} 2>&1"], privileged=True)
+                    result = container.exec_run(
+                        ["/bin/sh", "-c", f"{cmd} 2>&1"], privileged=True
+                    )
                     output = result[1].decode("utf-8", "replace") if result[1] else ""
                     debug_info.append(f"ss -K command {i} output:\n{output}")
 
@@ -1136,7 +1521,7 @@ def kill_connection(container_id: str, inode: int, local_address: str | None = N
                             "inode": inode,
                             "killed": True,
                             "debug": debug_info,
-                            "message": f"Connection killed via ss -K (command {i})"
+                            "message": f"Connection killed via ss -K (command {i})",
                         }
 
             # Method 3: Use nicolaka/netshoot image connected to target container's network
@@ -1190,7 +1575,9 @@ exit 1
                         )
                         helper.wait(timeout=250)  # Longer timeout for image pull
                         output = helper.logs(stdout=True, stderr=True)
-                        kill_output = output.decode("utf-8", "replace") if output else ""
+                        kill_output = (
+                            output.decode("utf-8", "replace") if output else ""
+                        )
                         debug_info.append(f"netshoot kill output:\n{kill_output}")
 
                         if "SUCCESS" in kill_output:
@@ -1198,7 +1585,7 @@ exit 1
                                 "inode": inode,
                                 "killed": True,
                                 "debug": debug_info,
-                                "message": "Connection killed via netshoot"
+                                "message": "Connection killed via netshoot",
                             }
 
                     except Exception as e:
@@ -1216,7 +1603,7 @@ exit 1
                 "inode": inode,
                 "killed": False,
                 "debug": debug_info,
-                "message": "Could not kill connection - no socket-level method available"
+                "message": "Could not kill connection - no socket-level method available",
             }
         except Exception as e:
             debug_info.append(f"Container exec exception: {str(e)}")
@@ -1224,7 +1611,7 @@ exit 1
                 "inode": inode,
                 "killed": False,
                 "debug": debug_info,
-                "message": f"Container exec kill failed: {str(e)}"
+                "message": f"Container exec kill failed: {str(e)}",
             }
 
     except HTTPException:
