@@ -42,6 +42,20 @@ stop-backend-docker: ## Stop the Docker backend
 dev-ui: ## Serve ui/ on http://127.0.0.1:8000 for browser development (no-cache, avoids stale app.js)
 	cd ui && $(PYTHON) $(CURDIR)/scripts/dev_ui_server.py 8000 .
 
+build-collector: ## Build the InfluxDB collector cron image (imgfastler-collector:latest)
+	bash scripts/build_collector_image.sh
+
+run-collector: ## Create + start the collector container (10s cron cadence, host network)
+	docker inspect collector-stack >/dev/null 2>&1 && docker start collector-stack || \
+	docker run -d --name collector-stack --network host \
+		--restart unless-stopped \
+		-v /var/run/docker.sock.raw:/var/run/docker.sock \
+		imgfastler-collector:latest
+	@echo "Collector running; logs: docker logs -f collector-stack"
+
+stop-collector: ## Stop and remove the collector container
+	-docker rm -f collector-stack
+
 test-backend: ## Smoke test the API served by `make run-backend` (uses python3 only)
 	python3 scripts/smoke.py http://127.0.0.1:$(TEST_PORT)
 
@@ -82,4 +96,5 @@ prepare-buildx: ## Create a buildx builder for multi-arch builds, if it does not
 
 .PHONY: help build-extension install-extension update-extension uninstall-extension \
 	inspect-extension run-backend run-backend-docker stop-backend-docker dev-ui test-backend \
+	build-collector run-collector stop-collector \
 	test check lint format lint-fix push-extension prepare-buildx
