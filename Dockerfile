@@ -33,6 +33,13 @@ COPY .venv/lib/python3.12/site-packages /opt/venv/lib/python3.12/site-packages
 ########################################################################
 FROM python:3.12-slim
 
+# tcpkill (from dsniff) is used to kill network connections of other
+# containers: the backend spawns a short-lived helper from this image sharing
+# the target's network namespace. Needs apt lists at build time only.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends dsniff \
+    && rm -rf /var/lib/apt/lists/*
+
 LABEL org.opencontainers.image.title="imgfastler" \
       org.opencontainers.image.description="Browse local images and start a container from any of them, with mounts, networks, environment variables and ports." \
       org.opencontainers.image.vendor="imgfastler" \

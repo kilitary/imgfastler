@@ -248,6 +248,19 @@ main {
   padding: 16px;
 }
 
+/* Logs tab: break out of the page max-width for a full-width reading pane. */
+#view-logs {
+  margin-inline: calc(50% - 50vw);
+  padding-inline: 16px;
+}
+
+#alllogs-output {
+  font-family: var(--mono) !important;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -383,8 +396,27 @@ main {
   border-bottom-color: var(--muted, #94a3b8);
 }
 
-/* Temporary highlight for a revealed container row (5s) */
-.row-flash {
+/* Networks page: clickable rows */
+.network-row.is-clickable,
+.network-container-row {
+  cursor: pointer;
+}
+
+.network-row.is-clickable:hover,
+.network-container-row:hover {
+  background: var(--accent-soft);
+}
+
+/* Kill-result status line on the connections view */
+#connections-status {
+  min-height: 1.2em;
+}
+
+#connections-status.is-error {
+  color: #dc2626;
+}
+
+/* Temporary highlight for a revealed container row (5s) */.row-flash {
   animation: row-flash 5s ease-out forwards;
 }
 

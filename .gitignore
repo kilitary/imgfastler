@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .playwright-mcp/
 .pyatlas/
+3proxy.cfg

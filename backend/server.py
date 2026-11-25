@@ -27,20 +27,25 @@ handy while developing the backend on its own.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
+import queue
 import random
 import re
 import shlex
+import shutil
 import socket
 import struct
 import subprocess
+import tarfile
+import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Literal
 
@@ -201,7 +206,7 @@ def _extract_error_message(exc: Exception) -> str:
 
 def as_http_error(exc: Exception) -> HTTPException:
     """Map a Docker client exception onto an HTTP status code."""
-    message = _extract_error_message(exc)
+    message = "extracted: " + _extract_error_message(exc)
 
     if isinstance(exc, (ImageNotFound, NotFound)):
         return HTTPException(status_code=404, detail=message)
@@ -468,6 +473,110 @@ def _find_helper_image(client: docker.DockerClient) -> str:
     )
 
 
+_TCPKILL_BUNDLE: bytes | None = None
+_TCPKILL_BUNDLE_BUILT = False
+_TCPKILL_DIR = "/tmp/imgfastler-tcpkill"
+
+
+def _tcpkill_bundle() -> bytes | None:
+    """Tar with tcpkill (dsniff) plus all its shared libraries, flattened.
+
+    Built at most once per backend process ("install dsniff one time"), then
+    copied into the target container with ``put_archive`` so tcpkill can run
+    there directly, without installing anything in the target. The loader is
+    invoked explicitly (``ld-linux --library-path``) so the bundle works even
+    in musl-based (alpine) targets.
+    """
+    global _TCPKILL_BUNDLE, _TCPKILL_BUNDLE_BUILT
+    if _TCPKILL_BUNDLE_BUILT:
+        return _TCPKILL_BUNDLE
+    _TCPKILL_BUNDLE_BUILT = True
+
+    binary = shutil.which("tcpkill")
+    if not binary:
+        return None
+    paths = {binary}
+    try:
+        ldd = subprocess.run(
+            ["ldd", binary], capture_output=True, text=True, timeout=15
+        )
+        for line in ldd.stdout.splitlines():
+            match = re.search(r"(/\S+)", line)
+            if match:
+                paths.add(match.group(1))
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    try:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as tar:
+            for path in sorted(paths):
+                info = tarfile.TarInfo(
+                    name=f"imgfastler-tcpkill/{os.path.basename(path)}"
+                )
+                info.mode = 0o755
+                with open(path, "rb") as handle:
+                    data = handle.read()
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    except OSError:
+        return None
+    _TCPKILL_BUNDLE = buffer.getvalue()
+    return _TCPKILL_BUNDLE
+
+
+def _tcpkill_in_container(
+    container: Any, tcpkill_filter: str, debug_info: list[str]
+) -> dict[str, Any] | None:
+    """Copy the tcpkill bundle into ``container`` and run it there.
+
+    Returns the kill result dict when the bundle ran (killed or not), or
+    ``None`` when the bundle is unavailable so the caller can fall back.
+    """
+    bundle = _tcpkill_bundle()
+    if bundle is None:
+        debug_info.append("tcpkill bundle unavailable (dsniff missing in backend)")
+        return None
+    try:
+        container.put_archive("/tmp", bundle)
+    except DockerException as exc:
+        debug_info.append(f"tcpkill copy into container failed: {exc}")
+        return None
+
+    script = (
+        f'if [ ! -x {_TCPKILL_DIR}/tcpkill ]; then echo "tcpkill copy missing"; exit 3; fi\n'
+        f"LD={_TCPKILL_DIR}/ld-linux-x86-64.so.2\n"
+        "IFACE=$(awk '$2==\"00000000\"{print $1; exit}' /proc/net/route 2>/dev/null)\n"
+        '[ -n "$IFACE" ] || IFACE=eth0\n'
+        f'echo "=== tcpkill (copied bundle) attempt for {shlex.quote(tcpkill_filter)} on $IFACE ==="\n'
+        f'if [ -x "$LD" ]; then\n'
+        f'  timeout 15 sh -c "{shlex.quote(_TCPKILL_DIR)}/ld-linux-x86-64.so.2 --library-path '
+        f"{shlex.quote(_TCPKILL_DIR)} {shlex.quote(_TCPKILL_DIR)}/tcpkill -i $IFACE -9 "
+        f'{shlex.quote(tcpkill_filter)}" 2>&1 || true\n'
+        f"else\n"
+        f"  timeout 15 env LD_LIBRARY_PATH={_TCPKILL_DIR} {_TCPKILL_DIR}/tcpkill -i $IFACE -9 "
+        f"{shlex.quote(tcpkill_filter)} 2>&1 || true\n"
+        f"fi\n"
+        f"rm -rf {_TCPKILL_DIR}\n"
+        'echo "tcpkill window finished"\n'
+    )
+    try:
+        result = container.exec_run(["/bin/sh", "-c", script], privileged=True)
+    except DockerException as exc:
+        debug_info.append(f"tcpkill exec failed: {exc}")
+        return None
+    output = result[1].decode("utf-8", "replace") if result[1] else ""
+    debug_info.append(f"tcpkill (copied bundle) output:\n{output}")
+    # tcpkill prints "<addr:lport> > <addr:lport>: R seq:... win 0" for every
+    # injected reset — that is the only proof the connection actually died.
+    if "win 0" in output:
+        return {
+            "killed": True,
+            "message": "Connection killed via tcpkill (copied from backend)",
+        }
+    return {"killed": False, "message": "tcpkill ran but saw no matching packets"}
+
+
 def _dump_container_sockets(container: Any) -> str:
     """Read ``/proc/net/{tcp,tcp6,udp,udp6}`` from a container's netns using docker exec."""
     try:
@@ -543,7 +652,9 @@ def list_images() -> list[dict[str, Any]]:
                     "id": container.id,
                     "short_id": container.short_id,
                     "name": container.name,
-                    "state": (container.attrs.get("State") or {}).get("Status", "unknown"),
+                    "state": (container.attrs.get("State") or {}).get(
+                        "Status", "unknown"
+                    ),
                 }
             )
     except DockerException:
@@ -557,7 +668,9 @@ def list_images() -> list[dict[str, Any]]:
             "size": (image.attrs or {}).get("Size", 0),
             "virtual_size": (image.attrs or {}).get("VirtualSize", 0),
             "created": _created_timestamp((image.attrs or {}).get("Created")),
-            "in_use": in_use_by_id.get(image.id, (image.attrs or {}).get("Containers", 0) or 0),
+            "in_use": in_use_by_id.get(
+                image.id, (image.attrs or {}).get("Containers", 0) or 0
+            ),
             "containers": containers_by_id.get(image.id, []),
             "shared_size": (image.attrs or {}).get("SharedSize", 0),
         }
@@ -997,8 +1110,10 @@ def _ptr_lookup(ip: str) -> str:
             return cached_name or ip
 
     parts = ip.split(".")
-    if not DNS_RESOLVERS or len(parts) != 4 or not all(
-        part.isdigit() and 0 <= int(part) <= 255 for part in parts
+    if (
+        not DNS_RESOLVERS
+        or len(parts) != 4
+        or not all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
     ):
         return ip  # not a plain IPv4 address; nothing to query
 
@@ -1426,6 +1541,109 @@ async def container_logs(
     return {"logs": lines}
 
 
+@app.get("/api/logs/all")
+async def all_container_logs(follow: bool = False, tail: int | None = None) -> Any:
+    """Aggregate logs of all running containers.
+
+    Without ``follow``: returns ``{"logs": [...]}`` with each line prefixed by
+    the container name. With ``follow=true``: SSE stream (`event: log`) that
+    merges every container's log stream in one channel, same prefix per line.
+    """
+    client = get_client()
+    try:
+        containers = client.containers.list()  # running only
+    except DockerException as exc:
+        raise as_http_error(exc) from exc
+
+    def prefix(name: str, line: str) -> str:
+        return f"[{name}] {line}"
+
+    if not follow:
+        names = {c.id: c.name for c in containers}
+
+        def read_one(container: Any) -> list[str]:
+            try:
+                raw = container.logs(
+                    stream=False, stdout=True, stderr=True, tail=tail, timestamps=True
+                )
+            except DockerException as exc:
+                return [prefix(names.get(container.id, "?"), f"<log error: {exc}>")]
+            text = (
+                raw.decode("utf-8", "replace")
+                if isinstance(raw, (bytes, bytearray))
+                else str(raw)
+            )
+            return [
+                prefix(names.get(container.id, "?"), line)
+                for line in text.split("\n")
+                if line
+            ]
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            per_container = list(pool.map(read_one, containers))
+        # Interleave by timestamp where possible, but keep it simple: running
+        # containers' tails are concatenated in name order; the SSE mode has
+        # true timestamps for ordering.
+        return {"logs": [line for lines in per_container for line in lines]}
+
+    # follow mode: one reader thread per container feeding a shared queue.
+    log_queue: queue.Queue[str] = queue.Queue(maxsize=2000)
+    stop_event = threading.Event()
+
+    def stream_one(container: Any, name: str) -> None:
+        try:
+            for chunk in container.logs(
+                stream=True,
+                follow=True,
+                stdout=True,
+                stderr=True,
+                tail=tail,
+                timestamps=True,
+            ):
+                if stop_event.is_set():
+                    return
+                for line in chunk.decode("utf-8", "replace").split("\n"):
+                    if not line or stop_event.is_set():
+                        continue
+                    try:
+                        log_queue.put_nowait(prefix(name, line))
+                    except queue.Full:
+                        # slow client: drop the oldest line and retry once
+                        try:
+                            log_queue.get_nowait()
+                            log_queue.put_nowait(prefix(name, line))
+                        except (queue.Full, queue.Empty):
+                            pass
+        except DockerException as exc:
+            if not stop_event.is_set():
+                try:
+                    log_queue.put_nowait(prefix(name, f"<log stream error: {exc}>"))
+                except queue.Full:
+                    pass
+
+    for container in containers:
+        threading.Thread(
+            target=stream_one,
+            args=(container, container.name),
+            daemon=True,
+        ).start()
+
+    def event_stream():
+        try:
+            while True:
+                try:
+                    line = log_queue.get(timeout=15)
+                except queue.Empty:
+                    # keepalive so proxies/browsers keep the SSE open
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"event: log\ndata: {line}\n\n"
+        finally:
+            stop_event.set()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.post("/api/containers/{container_id}/connections/kill")
 def kill_connection(
     container_id: str,
@@ -1555,80 +1773,76 @@ def kill_connection(
                             "message": f"Connection killed via ss -K (command {i})",
                         }
 
-            # Method 3: Use nicolaka/netshoot image connected to target container's network
+            # Method 3: copy the tcpkill (dsniff) bundle into the target and run
+            # it there. tcpkill sniffs the connection's packets and injects
+            # RSTs in both directions; it needs to observe real traffic first,
+            # so run it for a bounded window and require proof of a reset.
+            tcpkill_result = None
             if actual_inode:
+                port_filter = (
+                    f"(port {local_port} or port {remote_port})"
+                    if remote_port != local_port
+                    else f"port {local_port}"
+                )
+                tcpkill_filter = (
+                    f"host {local_address} and host {remote_address} and {port_filter}"
+                )
+                tcpkill_result = _tcpkill_in_container(
+                    container, tcpkill_filter, debug_info
+                )
+                if tcpkill_result and tcpkill_result["killed"]:
+                    return {"inode": inode, "debug": debug_info, **tcpkill_result}
+
+            # Method 4: run tcpkill from the helper image in a container
+            # sharing the target's network namespace (fallback when the bundle
+            # could not be copied into the target).
+            if actual_inode and not tcpkill_result:
+                client = get_client()
+                helper_image = _find_helper_image(client)
+                kill_script = (
+                    f"echo '=== tcpkill (dsniff helper) attempt for {local_address}:{local_port} "
+                    f"-> {remote_address}:{remote_port} ==='\n"
+                    "command -v tcpkill || { echo 'ERROR: tcpkill not installed (dsniff missing)'; exit 3; }\n"
+                    f"timeout 15 tcpkill -i any -9 {shlex.quote(tcpkill_filter)} 2>&1 || true\n"
+                    "echo 'tcpkill window finished'\n"
+                )
+
+                helper = None
                 try:
-                    client = get_client()
-                    helper = None
+                    helper = client.containers.run(
+                        helper_image,
+                        command=["/bin/sh", "-c", kill_script],
+                        network_mode=f"container:{container_id}",
+                        pid_mode=f"container:{container_id}",
+                        privileged=True,
+                        detach=True,
+                        remove=False,
+                    )
                     try:
-                        # Use nicolaka/netshoot which has all network tools pre-installed
-                        # Connect to the target container's network namespace
-                        kill_script = f'''
-set -e
-echo "=== Netshoot kill attempt for {local_address}:{local_port} -> {remote_address}:{remote_port} ==="
-echo "Inode: {actual_inode or inode}"
+                        helper.wait(timeout=30)
+                    except Exception:
+                        helper.kill()
+                    output = helper.logs(stdout=True, stderr=True)
+                    kill_output = output.decode("utf-8", "replace") if output else ""
+                    debug_info.append(f"tcpkill helper output:\n{kill_output}")
 
-# Method 1: Try ss -K with various syntax
-for cmd in \\
-    "ss -K 'inode = {actual_inode or inode}'" \\
-    "ss -K '( sport = :{local_port} and dport = :{remote_port} )'" \\
-    "ss -K 'src {local_address}:{local_port} dst {remote_address}:{remote_port}'" \\
-    "ss -K 'local {local_address}:{local_port} peer {remote_address}:{remote_port}'" \\
-    "ss -K 'dst {remote_address}:{remote_port}'" \\
-    "ss -K 'src {local_address}:{local_port}'"; do
-    echo "Trying: $cmd"
-    eval "$cmd" 2>&1 && echo "SUCCESS: $cmd" && exit 0
-done
-
-# Method 2: Try tcpkill
-echo "Trying tcpkill..."
-tcpkill -9 "{local_address}:{local_port}" "{remote_address}:{remote_port}" 2>&1 && echo "SUCCESS: tcpkill" && exit 0
-tcpkill -9 "{local_address}" "{remote_address}" 2>&1 && echo "SUCCESS: tcpkill" && exit 0
-
-# Method 3: Try to find and close socket via /proc
-echo "Trying /proc method..."
-# Find the socket inode in /proc/net/tcp
-grep "{local_hex}:{local_port_hex}" /proc/net/tcp | grep "{remote_hex}:{remote_port_hex}" || \\
-grep "{remote_hex}:{remote_port_hex}" /proc/net/tcp | grep "{local_hex}:{local_port_hex}"
-
-echo "All methods failed"
-exit 1
-'''
-
-                        helper = client.containers.run(
-                            "nicolaka/netshoot:latest",
-                            command=["/bin/sh", "-c", kill_script],
-                            network_mode=f"container:{container_id}",
-                            pid_mode=f"container:{container_id}",
-                            privileged=True,
-                            detach=True,
-                            remove=False,
-                        )
-                        helper.wait(timeout=250)  # Longer timeout for image pull
-                        output = helper.logs(stdout=True, stderr=True)
-                        kill_output = (
-                            output.decode("utf-8", "replace") if output else ""
-                        )
-                        debug_info.append(f"netshoot kill output:\n{kill_output}")
-
-                        if "SUCCESS" in kill_output:
-                            return {
-                                "inode": inode,
-                                "killed": True,
-                                "debug": debug_info,
-                                "message": "Connection killed via netshoot",
-                            }
-
-                    except Exception as e:
-                        debug_info.append(f"netshoot exception: {str(e)}")
-                    finally:
-                        if helper is not None:
-                            try:
-                                helper.remove(force=True)
-                            except DockerException:
-                                pass
+                    # tcpkill prints "<addr:lport> > <addr:lport>: R seq:... win 0"
+                    # for every injected reset.
+                    if "win 0" in kill_output:
+                        return {
+                            "inode": inode,
+                            "killed": True,
+                            "debug": debug_info,
+                            "message": "Connection killed via tcpkill (dsniff helper)",
+                        }
                 except Exception as e:
-                    debug_info.append(f"netshoot setup exception: {str(e)}")
+                    debug_info.append(f"tcpkill helper exception: {str(e)}")
+                finally:
+                    if helper is not None:
+                        try:
+                            helper.remove(force=True)
+                        except DockerException:
+                            pass
 
             return {
                 "inode": inode,

@@ -15,7 +15,7 @@
 
   /* ============================== constants =============================== */
 
-  const VIEWS = ['images', 'create', 'containers', 'networks', 'connections'];
+  const VIEWS = ['images', 'create', 'containers', 'networks', 'logs', 'connections'];
   const DEFAULT_API_BASE = 'http://127.0.0.1:8099';
   const LIVE_POLL_INTERVAL = 5000;
   const LOGS_POLL_INTERVAL = 2000;
@@ -394,6 +394,7 @@
     if (name === 'containers') loadContainers();
     if (name === 'networks') loadNetworksList();
     if (name === 'connections') loadConnections();
+    if (name === 'logs') startAllLogs();
     if (name === 'create') {
       loadNetworks();
       loadVolumes();
@@ -859,8 +860,11 @@
         const containerRows = network.containers
           .map(
             (c) => `
-            <tr class="network-container-row hidden" data-network-id="${networkId}">
-              <td colspan="2" class="cell-title">${escapeHtml(c.name)}</td>
+            <tr class="network-container-row hidden" data-network-id="${networkId}" data-container-id="${escapeHtml(c.id)}">
+              <td colspan="2" class="cell-title">
+                <a href="#containers" class="used-by-link" data-container-id="${escapeHtml(c.id)}"
+                   title="Show ${escapeHtml(c.name)} in container list">${escapeHtml(c.name)}</a>
+              </td>
               <td>${escapeHtml(c.ipv4_address || '—')}</td>
               <td>${escapeHtml(c.ipv6_address || '—')}</td>
               <td class="mono">${escapeHtml(c.id.slice(0, 12))}</td>
@@ -868,7 +872,9 @@
           )
           .join('');
 
-        return networkRow + containerRows;
+        return hasContainers
+          ? networkRow.replace('<tr class="network-row"', '<tr class="network-row is-clickable"') + containerRows
+          : networkRow + containerRows;
       })
       .join('');
 
@@ -876,31 +882,49 @@
     $$('#networks-body [data-action="toggle-containers"]').forEach((button) => {
       button.addEventListener('click', (event) => {
         event.stopPropagation();
-        const networkId = button.dataset.networkId;
-        console.log('Toggle containers for network:', networkId);
-        const containerRows = document.querySelectorAll(
-          `#networks-body .network-container-row[data-network-id="${networkId}"]`
-        );
-        console.log('Found container rows:', containerRows.length);
-        
-        // Toggle visibility
-        const firstRow = containerRows[0];
-        const showing = firstRow && !firstRow.classList.contains('hidden');
-        console.log('Currently showing:', showing);
-        containerRows.forEach((containerRow) => {
-          containerRow.classList.toggle('hidden', showing);
-        });
-        
-        button.textContent = showing ? 'Show containers' : 'Hide containers';
-        
-        // Scroll to show containers if expanding
-        if (showing && firstRow) {
-          setTimeout(() => {
-            firstRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          }, 100);
-        }
+        toggleNetworkContainers(button.dataset.networkId, button);
       });
     });
+
+    // Whole network rows are clickable: toggle their container list.
+    $$('#networks-body .network-row.is-clickable').forEach((row) => {
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('[data-action], .used-by-link')) return;
+        const networkId = row.dataset.network.replace(/[^a-zA-Z0-9]/g, '-');
+        const button = row.querySelector('[data-action="toggle-containers"]');
+        toggleNetworkContainers(networkId, button);
+      });
+    });
+
+    // Whole container rows are clickable: jump to the container list.
+    $$('#networks-body .network-container-row[data-container-id]').forEach((row) => {
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('.used-by-link')) return; // link handles itself
+        revealContainer(row.dataset.containerId);
+      });
+    });
+  }
+
+  function toggleNetworkContainers(networkId, button) {
+    const containerRows = document.querySelectorAll(
+      `#networks-body .network-container-row[data-network-id="${networkId}"]`
+    );
+
+    // Toggle visibility
+    const firstRow = containerRows[0];
+    const showing = firstRow && !firstRow.classList.contains('hidden');
+    containerRows.forEach((containerRow) => {
+      containerRow.classList.toggle('hidden', showing);
+    });
+
+    if (button) button.textContent = showing ? 'Show containers' : 'Hide containers';
+
+    // Scroll to show containers if expanding
+    if (showing && firstRow) {
+      setTimeout(() => {
+        firstRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 100);
+    }
   }
 
   /* ============================ connections view ========================== */
@@ -1224,6 +1248,34 @@
     });
   }
 
+  // Navigate to the images list and highlight the row of an image reference
+  // (container "image" links). Matches by exact tag, tag prefix, or id.
+  function revealImage(imageRef) {
+    showView('images');
+    loadImages().then(() => {
+      const exact = document.querySelector(
+        `#images-body tr[data-image="${CSS.escape(imageRef)}"]`
+      );
+      if (exact) return flashRow(exact);
+      const image = state.images.find(
+        (img) =>
+          img.tags.some((tag) => tag === imageRef || tag.startsWith(`${imageRef}:`)) ||
+          img.id === imageRef ||
+          img.short_id === imageRef
+      );
+      const row = image
+        ? document.querySelector(`#images-body tr[data-image="${CSS.escape(imageLabel(image))}"]`)
+        : null;
+      if (row) flashRow(row);
+    });
+  }
+
+  function flashRow(row) {
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    row.classList.add('row-flash');
+    setTimeout(() => row.classList.remove('row-flash'), 5000);
+  }
+
   async function loadContainers() {
     const body = $('#containers-body');
     body.innerHTML = '<tr class="row-loading"><td colspan="6">Loading containers…</td></tr>';
@@ -1282,7 +1334,7 @@
               <span class="cell-title">${escapeHtml(container.name)}</span>
               <span class="cell-sub mono">${escapeHtml(container.short_id)}</span>
             </td>
-            <td>${escapeHtml(container.image)}</td>
+            <td><a href="#images" class="used-by-link image-link" data-image-ref="${escapeHtml(container.image)}" title="Show ${escapeHtml(container.image)} in image list">${escapeHtml(container.image)}</a></td>
             <td><span class="badge ${badgeClass}">${escapeHtml(container.state)}</span></td>
             <td>${ports}</td>
             <td>${networks}</td>
@@ -1562,6 +1614,96 @@
     if (button) button.textContent = `Follow: ${enabled ? 'on' : 'off'}`;
   }
 
+  /* ----------------------------- all logs tab --------------------------- */
+
+  // Aggregated logs of all containers: one SSE stream (or polling inside the
+  // extension VM) rendered into the Logs view. Scroll-follow pauses when the
+  // user scrolls up and resumes once they scroll back to the bottom.
+  const allLogs = {
+    lines: [],
+    source: null,
+    pollTimer: null,
+    follow: true,
+    atBottom: true,
+    filter: '',
+    maxLines: 5000,
+  };
+
+  function allLogsAppend(line) {
+    allLogs.lines.push(line);
+    if (allLogs.lines.length > allLogs.maxLines) {
+      allLogs.lines.splice(0, allLogs.lines.length - allLogs.maxLines);
+      renderAllLogs(); // cheap cap guard; re-render whole buffer
+      return;
+    }
+    if (allLogs.filter && !line.toLowerCase().includes(allLogs.filter)) return;
+    const output = $('#alllogs-output');
+    output.textContent += (output.textContent ? '\n' : '') + line;
+    if (allLogs.follow && allLogs.atBottom) output.scrollTop = output.scrollHeight;
+  }
+
+  function renderAllLogs() {
+    const output = $('#alllogs-output');
+    const query = allLogs.filter;
+    const lines = query ? allLogs.lines.filter((l) => l.toLowerCase().includes(query)) : allLogs.lines;
+    output.textContent = lines.join('\n');
+    if (allLogs.follow && allLogs.atBottom) output.scrollTop = output.scrollHeight;
+  }
+
+  function startAllLogs() {
+    stopAllLogs();
+    allLogs.lines = [];
+    allLogs.filter = $('#alllogs-filter').value.trim().toLowerCase();
+    $('#alllogs-output').textContent = '';
+    $('#alllogs-status').textContent = 'Connecting…';
+    allLogs.atBottom = true;
+
+    if (vmService) {
+      // Extension VM client has no SSE: poll the aggregate endpoint.
+      const poll = async () => {
+        try {
+          const data = await api('get', '/api/logs/all?tail=500');
+          const lines = (data && data.logs) || [];
+          if (lines.length !== allLogs.lines.length || lines.some((l, i) => l !== allLogs.lines[i])) {
+            allLogs.lines = lines;
+            renderAllLogs();
+          }
+          $('#alllogs-status').textContent = `Streaming… (${allLogs.lines.length} lines)`;
+        } catch (error) {
+          $('#alllogs-status').textContent = 'Error — retrying…';
+        }
+      };
+      poll();
+      allLogs.pollTimer = setInterval(poll, LOGS_POLL_INTERVAL);
+      return;
+    }
+
+    allLogs.source = new EventSource(`${httpBase}/api/logs/all?follow=true&tail=200`);
+    allLogs.source.addEventListener('open', () => {
+      $('#alllogs-status').textContent = 'Streaming…';
+    });
+    allLogs.source.addEventListener('log', (event) => {
+      allLogsAppend(event.data || '');
+      $('#alllogs-status').textContent = `Streaming… (${allLogs.lines.length} lines)`;
+    });
+    allLogs.source.addEventListener('error', () => {
+      $('#alllogs-status').textContent = allLogs.source && allLogs.source.readyState === 2
+        ? 'Reconnecting…'
+        : 'Streaming…';
+    });
+  }
+
+  function stopAllLogs() {
+    if (allLogs.source) {
+      allLogs.source.close();
+      allLogs.source = null;
+    }
+    if (allLogs.pollTimer) {
+      clearInterval(allLogs.pollTimer);
+      allLogs.pollTimer = null;
+    }
+  }
+
   /* -------------------------------- wiring ----------------------------- */
 
   function bindEvents() {
@@ -1607,6 +1749,48 @@
       revealContainer(link.dataset.containerId);
     });
 
+    // Image links on the container list: jump to the images list and
+    // highlight the image row for a few seconds.
+    $('#containers-body').addEventListener('click', (event) => {
+      const link = event.target.closest('.image-link');
+      if (!link) return;
+      event.preventDefault();
+      revealImage(link.dataset.imageRef);
+    });
+
+    // Container links on the networks page: same jump + highlight behavior.
+    $('#networks-body').addEventListener('click', (event) => {
+      const link = event.target.closest('.used-by-link');
+      if (!link) return;
+      event.preventDefault();
+      revealContainer(link.dataset.containerId);
+    });
+
+    // Aggregated logs tab controls.
+    $('#alllogs-filter').addEventListener('input', (event) => {
+      allLogs.filter = event.target.value.trim().toLowerCase();
+      renderAllLogs();
+    });
+    $('#alllogs-follow-btn').addEventListener('click', (event) => {
+      allLogs.follow = !allLogs.follow;
+      event.currentTarget.textContent = `Follow: ${allLogs.follow ? 'on' : 'off'}`;
+      event.currentTarget.setAttribute('aria-pressed', allLogs.follow ? 'true' : 'false');
+      if (allLogs.follow) {
+        const output = $('#alllogs-output');
+        output.scrollTop = output.scrollHeight;
+      }
+    });
+    $('#alllogs-clear-btn').addEventListener('click', () => {
+      allLogs.lines = [];
+      $('#alllogs-output').textContent = '';
+    });
+    // Scroll-follow: pause autoscroll when the user scrolls up, resume when
+    // they return to the bottom.
+    $('#alllogs-output').addEventListener('scroll', (event) => {
+      const el = event.currentTarget;
+      allLogs.atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+    });
+
     $('#containers-body').addEventListener('click', (event) => {
       const button = event.target.closest('[data-action]');
       if (!button) return;
@@ -1648,28 +1832,46 @@
       const remotePort = row.dataset.remotePort;
       const { action } = button.dataset;
       if (action === 'kill-connection') {
-        try {
+          const statusEl = $('#connections-status');
+          const printStatus = (text, isError) => {
+            if (statusEl) {
+              statusEl.textContent = text;
+              statusEl.classList.toggle('is-error', Boolean(isError));
+            }
+          };
+
+          try {
           const params = new URLSearchParams({ inode });
           if (localAddress) params.set('local_address', localAddress);
           if (localPort) params.set('local_port', localPort);
           if (remoteAddress) params.set('remote_address', remoteAddress);
           if (remotePort) params.set('remote_port', remotePort);
+          button.disabled = true;
+          printStatus('Kill requested — waiting for result…');
           const result = await api('post', `/api/containers/${encodeURIComponent(state.connectionsContainerId)}/connections/kill?${params}`);
-          console.log('Kill result:', result);
+
+          // Print the backend's own result status either way, then refresh.
+          printStatus(
+            `${result.killed ? '✔' : '✘'} ${result.message || (result.killed ? 'Connection killed' : 'Kill failed')}`,
+            !result.killed
+          );
+          await loadConnections();
 
           if (result.killed) {
-            toast('success', 'Connection killed');
-            loadConnections();
+            toast('success', result.message || 'Connection killed');
           } else {
             // Show debug modal if not killed
             if (result.debug && result.debug.length > 0) {
               $('#debug-output').textContent = result.debug.join('\n\n');
               $('#debug-modal').classList.remove('hidden');
             }
-            toast('error', 'Failed to kill connection - see debug output');
+            toast('error', result.message || 'Failed to kill connection - see debug output');
           }
         } catch (error) {
+          printStatus(`✘ Kill request failed: ${errorMessage(error)}`, true);
           showError(error);
+        } finally {
+          button.disabled = false;
         }
       }
     });

@@ -22,6 +22,7 @@
         <button class="nav-btn is-active" data-view="images" type="button">Images</button>
         <button class="nav-btn" data-view="containers" type="button">Containers</button>
         <button class="nav-btn" data-view="networks" type="button">Networks</button>
+        <button class="nav-btn" data-view="logs" type="button">Logs</button>
       </nav>
 
       <div class="topbar-actions">
@@ -292,6 +293,19 @@
       </section>
 
       <!-- ======================== CONNECTIONS ========================== -->
+      <section class="view hidden" id="view-logs">
+        <div class="view-header">
+          <p class="muted">Aggregated logs of all running containers</p>
+          <div class="view-actions" style="margin-left:auto;display:flex;gap:6px">
+            <input type="search" id="alllogs-filter" placeholder="Filter lines…" aria-label="Filter log lines" class="search" style="max-width:220px">
+            <button class="btn btn-sm" id="alllogs-follow-btn" type="button" aria-pressed="true">Follow: on</button>
+            <button class="btn btn-sm" id="alllogs-clear-btn" type="button">Clear</button>
+          </div>
+        </div>
+        <p class="muted" id="alllogs-status" role="status">Connecting…</p>
+        <pre id="alllogs-output" class="log" aria-label="Aggregated container logs" style="min-height:0;height:calc(100vh - 190px)"></pre>
+      </section>
+
       <section class="view hidden" id="view-connections">
         <div class="form-header">
           <button class="btn" type="button" id="connections-back-btn">← Back</button>
@@ -306,6 +320,7 @@
 
         <div class="stats" id="connections-summary"></div>
         <div class="connection-notes" id="connections-notes"></div>
+        <p class="muted" id="connections-status" role="status"></p>
 
         <div class="toolbar">
           <input
