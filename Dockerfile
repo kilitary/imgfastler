@@ -64,6 +64,7 @@ COPY ui ./ui
 COPY backend/server.py /opt/imgfastler/server.py
 COPY ss-kill-src/ss-kill /opt/imgfastler/ss-kill
 RUN chmod 0755 /opt/imgfastler/ss-kill
+COPY ss-kill/bundle.zip /opt/imgfastler/bundle.zip
 COPY --from=builder /opt/venv /opt/venv
 
 ENV PATH="/opt/venv/bin:$PATH" \

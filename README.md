@@ -27,6 +27,7 @@ It contains all three extension components:
 - **Connections** — inspect TCP/UDP sockets in a container's network namespace (IPv4 and IPv6,
   socket states, UID and inode), optionally resolve addresses to container/host names, and
   attempt to kill a connection (experimental — see [Network connections](#network-connections)).
+  Kill attempts show a formatted, color-coded debug trace with copy support.
 - **Live mode** — poll the active view every 5 seconds; the header also shows the engine version
   and the last refresh time.
 
@@ -49,7 +50,7 @@ It contains all three extension components:
   - Popups: none.
 - **Connections** — Inspect TCP/UDP sockets in a container’s network namespace.
   - Actions: **Back**; **Refresh**; filter by protocol/state/address/port/name; toggle **Resolve IPs**; **Kill** connection (experimental).
-  - Popups: **Debug Output** modal (shown when kill returns debug details/failure).
+  - Popups: **Connection kill debug** modal (formatted, color-coded diagnostic trace with copy).
 
 ---
 
@@ -61,13 +62,12 @@ It contains all three extension components:
 ├── docker-compose.yaml        # backend service definition (adds the Docker socket)
 ├── docker-compose.dev.yaml    # standalone backend for local development
 ├── Dockerfile                 # packages ui/ + backend/ + metafile into one image
-├── Makefile                   # build / install / dev / lint helpers
+├── Makefile                   # build / install / dev / test / lint helpers
 ├── docker.svg                 # extension icon
 ├── pyproject.toml             # project metadata, ruff + mypy config
 ├── .ruff.toml                 # ruff lint/format rules
 ├── .pre-commit-config.yaml    # pre-commit hooks (ruff)
-├── scripts/
-│   └── smoke.py               # end-to-end API smoke test
+├── scripts/                   # smoke test, dev UI server, collector/grafana helpers
 ├── ui/                        # frontend — extracted and served by Docker Desktop
 │   ├── index.html
 │   ├── styles.css
@@ -75,7 +75,13 @@ It contains all three extension components:
 │   └── logo.svg
 ├── backend/                   # backend — runs as a container in the Desktop VM
 │   ├── server.py
-│   └── requirements.txt
+│   ├── requirements.txt
+│   └── tests/                 # pytest unit tests (no Docker daemon needed)
+├── ss-kill/                   # prebuilt static ss-kill bundle shipped with the image
+│   └── bundle.zip
+├── ss-kill-src/               # ss-kill source/build artifacts
+├── collector/                 # InfluxDB collector image/assets
+├── grafana/                   # Grafana dashboards/provisioning
 ├── README.md
 ├── SETUP.md                   # note about sandboxed local backend execution
 └── REFACTORING.md             # history of the code-quality refactor
@@ -96,11 +102,12 @@ issues.
 
 ## Backend API
 
-All routes are prefixed with `/api` and are only reachable through the extension socket (or the
-development TCP port).
+Most routes are prefixed with `/api` and are only reachable through the extension socket (or the
+development TCP port). `GET /health` is a lightweight liveness probe (no engine round-trip).
 
 | Method   | Path                                       | Description                                                  |
 | -------- | ------------------------------------------ | ------------------------------------------------------------ |
+| `GET`    | `/health`                                  | lightweight liveness probe (no engine round-trip)            |
 | `GET`    | `/api/health`                              | backend + engine version/status                              |
 | `GET`    | `/api/images`                              | local images (tags, id, size, created, usage)                |
 | `GET`    | `/api/images/{name}/layers`                | image layer history (created_by, size, tags)                 |
@@ -111,6 +118,7 @@ development TCP port).
 | `GET`    | `/api/containers`                          | containers (state, ports, networks, mounts, restart policy)  |
 | `POST`   | `/api/containers`                          | validate + create + start a container                        |
 | `GET`    | `/api/containers/{id}/logs`                | logs (`?follow=true` for SSE, `?tail=N`)                     |
+| `GET`    | `/api/logs/all`                            | aggregated logs across running containers (SSE/follow)       |
 | `GET`    | `/api/containers/{id}/connections`         | TCP/UDP sockets in the container's network namespace         |
 | `POST`   | `/api/containers/{id}/connections/kill`    | kill a connection (experimental)                             |
 | `POST`   | `/api/containers/{id}/start`               | start                                                        |
@@ -158,7 +166,7 @@ address family, state, local/remote endpoints, UID, inode and queue sizes. Conta
 network namespace (for example `--network container:<id>` or host networking) are reported in
 `netns.shared_with`.
 
-`POST …/connections/kill` is **experimental**. It tries socket-level methods (`ss-kill` bundled from the host, then tcpkill via copied bundle/helper). Returns debug output when no method succeeds. Unlike container creation, helper-based fallbacks may need to be pulled the first time they run.
+`POST …/connections/kill` is **experimental**. It tries socket-level methods in order: a prebuilt static `ss-kill` bundle (`ss-kill/bundle.zip`, shipped with the image; not built at runtime), then `tcpkill` (dsniff) in the target container or via a helper image. The response includes `debug` details; the UI renders them as a formatted diagnostic trace. Helper-image fallbacks may need to be pulled the first time they run.
 
 ---
 
@@ -203,10 +211,12 @@ Useful targets:
 
 ```bash
 make check            # syntax checks for backend, frontend and metafile
+make test             # unit tests (backend/tests, no Docker daemon needed)
 make test-backend     # end-to-end API smoke test (backend must be running)
 make lint             # ruff check backend/
 make format           # ruff format backend/
 make lint-fix         # lint + format
+make dev-tcp          # run backend (TCP test mode) + UI dev server together
 ```
 
 The smoke test (`scripts/smoke.py`) walks the same flow as the UI: list images/networks, create a
@@ -245,6 +255,7 @@ proxies to the Unix socket declared in `metadata.json`.
 | `TEST_PORT`              | `0` (disabled)                          | Serve plain TCP on `127.0.0.1:<port>` instead of the socket     |
 | `LOG_LEVEL`              | `INFO`                                  | Backend log level                                               |
 | `IMGFASTLER_HELPER_IMAGE`| `${DESKTOP_PLUGIN_IMAGE}`               | Image used for the connection-inspection helper                 |
+| `IMGFASTLER_SS_KILL_BUNDLE` | *(auto-detected)*                    | Path to the prebuilt static `ss-kill` bundle zip                |
 
 ---
 
@@ -260,5 +271,6 @@ proxies to the Unix socket declared in `metadata.json`.
 * The Dockerfile reuses the local `.venv` site-packages in the build stage because PyPI is not
   always reachable from the build environment. Rebuild the venv before building the image when
   dependencies change.
+* The `ss-kill` connection-kill bundle is prebuilt and shipped as `ss-kill/bundle.zip` (copied into the image at build time); it is not generated at runtime.
 * Extension images are packaged as Docker images and distributed with semver tags; use
   `make push-extension` to publish a multi-arch (`linux/amd64`, `linux/arm64`) build.

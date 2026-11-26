@@ -21,8 +21,11 @@
             <div class="brand">
                 <img src="./logo.svg" alt="" width="32" height="32" />
                 <div class="brand-text">
-                    <h1>Imgfastler</h1>
-                    <p>Start a container from any local image</p>
+                    <div class="brand-title-row">
+                        <h1>Imgfastler</h1>
+                        <span class="app-version" id="app-version">v0.0.8</span>
+                    </div>
+                    <p>Start a container from any local directory</p>
                 </div>
             </div>
 
@@ -663,9 +666,15 @@
             aria-modal="true"
             aria-labelledby="debug-title"
         >
-            <div class="modal" style="max-height: 85vh">
-                <div class="modal-header">
-                    <h2 id="debug-title">Debug Output</h2>
+            <div class="modal debug-modal">
+                <div class="modal-header debug-modal-header">
+                    <div class="debug-modal-title-wrap">
+                        <span class="debug-modal-icon" aria-hidden="true">⚙</span>
+                        <div>
+                            <h2 id="debug-title">Connection kill debug</h2>
+                            <p class="debug-modal-subtitle" id="debug-subtitle">Diagnostic trace for the last kill attempt</p>
+                        </div>
+                    </div>
                     <button
                         class="btn btn-ghost"
                         id="debug-close"
@@ -675,16 +684,20 @@
                         ✕
                     </button>
                 </div>
-                <div class="modal-body">
-                    <pre
-                        id="debug-output"
-                        class="log mono"
-                        style="max-height: 60vh"
-                    ></pre>
+                <div class="modal-body debug-modal-body">
+                    <div id="debug-output" class="debug-log" aria-live="polite"></div>
                 </div>
-                <div class="modal-footer">
+                <div class="modal-footer debug-modal-footer">
+                    <span class="debug-modal-meta" id="debug-meta"></span>
                     <button
                         class="btn btn-sm"
+                        id="debug-copy-btn"
+                        type="button"
+                    >
+                        Copy log
+                    </button>
+                    <button
+                        class="btn btn-sm btn-primary"
                         id="debug-close-btn"
                         type="button"
                     >
@@ -715,11 +728,11 @@
                         <p class="kill-modal-status" id="kill-modal-status" role="status" aria-live="polite">
                             Preparing…
                         </p>
-                        <pre class="kill-modal-detail hidden" id="kill-modal-detail"></pre>
+                        <div class="kill-modal-detail hidden" id="kill-modal-detail"></div>
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button class="btn btn-sm hidden" id="kill-modal-debug" type="button">Show debug</button>
+                    <button class="btn btn-sm hidden" id="kill-modal-debug" type="button">Show debug log</button>
                     <button class="btn btn-sm btn-primary" id="kill-modal-close" type="button" disabled>Close</button>
                 </div>
             </div>

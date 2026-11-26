@@ -191,6 +191,28 @@ code {
   color: var(--text-muted);
 }
 
+.brand-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-version {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.4;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
 .nav {
   display: flex;
   gap: 4px;
@@ -1210,12 +1232,287 @@ legend {
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.55;
-  white-space: pre-wrap;
+  white-space: normal;
   word-break: break-word;
   color: var(--text-muted);
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 10px;
+}
+
+.kill-endpoint {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.kill-endpoint-side {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 180px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.kill-endpoint-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.kill-endpoint-value {
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.kill-endpoint-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 18px;
+  flex: 0 0 auto;
+}
+
+/* ----------------------------- debug / kill log ----------------------------- */
+
+.debug-modal {
+  width: min(960px, calc(100vw - 32px));
+  max-height: min(86vh, 920px);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.debug-modal-header {
+  align-items: flex-start;
+  padding: 18px 22px;
+  background: var(--panel);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, var(--panel)), var(--panel));
+}
+
+.debug-modal-title-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.debug-modal-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  font-size: 16px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: 10px;
+}
+
+.debug-modal-subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.debug-modal-body {
+  padding: 0;
+  background: #0d1117;
+}
+
+.debug-modal-footer {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.debug-modal-meta {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.debug-log {
+  margin: 0;
+  padding: 18px 20px 22px;
+  min-height: 220px;
+  max-height: 62vh;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #c9d1d9;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.02), transparent 120px),
+    #0d1117;
+}
+
+.debug-log:empty::before {
+  content: "No debug output captured.";
+  color: #8b949e;
+}
+
+.debug-entry {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.debug-entry:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.debug-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.debug-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.debug-badge.is-info {
+  color: #79c0ff;
+  background: rgba(56, 139, 253, 0.15);
+  border-color: rgba(56, 139, 253, 0.3);
+}
+
+.debug-badge.is-success {
+  color: #7ee787;
+  background: rgba(46, 160, 67, 0.18);
+  border-color: rgba(46, 160, 67, 0.35);
+}
+
+.debug-badge.is-error {
+  color: #ffa198;
+  background: rgba(248, 81, 73, 0.16);
+  border-color: rgba(248, 81, 73, 0.35);
+}
+
+.debug-badge.is-warn {
+  color: #f2cc60;
+  background: rgba(187, 128, 9, 0.18);
+  border-color: rgba(187, 128, 9, 0.35);
+}
+
+.debug-badge.is-cmd {
+  color: #d2a8ff;
+  background: rgba(163, 113, 247, 0.16);
+  border-color: rgba(163, 113, 247, 0.32);
+}
+
+.debug-entry-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e6edf3;
+  word-break: break-word;
+}
+
+.debug-entry-body {
+  margin: 0;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #9fb1c1;
+  background: rgba(110, 118, 129, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.debug-entry-body.is-plain {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: #b6c2cf;
+}
+
+.debug-line {
+  display: block;
+  padding: 1px 0;
+}
+
+.debug-line.is-error { color: #ffa198; }
+.debug-line.is-warn { color: #f2cc60; }
+.debug-line.is-success { color: #7ee787; }
+.debug-line.is-info { color: #79c0ff; }
+.debug-line.is-dim { color: #8b949e; }
+
+.debug-kv {
+  display: grid;
+  grid-template-columns: minmax(140px, auto) 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.debug-kv dt {
+  color: #8b949e;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.debug-kv dd {
+  margin: 0;
+  color: #c9d1d9;
+  word-break: break-word;
+}
+
+.debug-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #f2cc60;
+  background: rgba(187, 128, 9, 0.12);
+  border: 1px solid rgba(187, 128, 9, 0.28);
+  border-radius: 10px;
+}
+
+.debug-notice-icon {
+  flex: 0 0 auto;
+  line-height: 1.4;
+}
+
+@media (prefers-color-scheme: light) {
+  .debug-modal-body,
+  .debug-log {
+    background: #0f172a;
+  }
 }
 
 /* -------------------------------- layers modal -------------------------------- */

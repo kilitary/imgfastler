@@ -6,6 +6,8 @@ Guidance for AI agents working on this repository.
 - read all codebase before assigning code changes 
 - increase minor project version on fixes and increase major on new functions. if working gives errors/recovers of changes set alpha/beta/gamma subversions sequently at 25% of each
 - when writing code logic, be sure for your decisions, test all pathes it can go, analyze all variants of input vector going to routines.
+- dont write any fucking unit tests, only for dev-runtime checking
+- always use 'planning-with-files' skill
 
 ## What this is
 

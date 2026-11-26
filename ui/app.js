@@ -1555,10 +1555,131 @@
 
   let killInProgress = false;
   let killDebugText = '';
+  let killDebugDetail = '';
+
+  function _debugLineClass(line) {
+    const s = line.trim();
+    if (!s) return 'is-dim';
+    if (/(\berror\b|\bfailed\b|\bexception\b|\btraceback\b|\bcannot\b|\bcould not\b|\bdenied\b|not found|no such|exit=\s*[1-9])/i.test(s)) return 'is-error';
+    if (/(\bwarn(?:ing)?\b|\bmissing\b|\btimeout\b|\bskipped\b|no debug output)/i.test(s)) return 'is-warn';
+    if (/(\bok\b|\bsuccess\b|\bkilled\b|win 0|exit=\s*0\b|\btrue\b)/i.test(s)) return 'is-success';
+    if (/^(#|===|---|\[|\*|>|\d+\.)/.test(s) || /^(connection|searching|local hex|remote hex|found actual inode|attempting)/i.test(s)) return 'is-info';
+    return '';
+  }
+
+  function _classifyDebugEntry(text) {
+    const t = text.trim();
+    if (/^NOTICE:/i.test(t)) return { kind: 'notice', badge: 'notice', tone: 'warn', title: 'Notice' };
+    if (/^===\s*(.*?)\s*===?$/.test(t.split('\n')[0])) {
+      const m = t.split('\n')[0].match(/^===\s*(.*?)\s*===?$/);
+      return { kind: 'section', badge: 'step', tone: 'info', title: m ? m[1].trim() : 'Step' };
+    }
+    if (/^Connection details:/i.test(t)) return { kind: 'detail', badge: 'inspect', tone: 'info', title: 'Connection details' };
+    if (/^Connection search output:/i.test(t)) return { kind: 'output', badge: 'probe', tone: 'info', title: 'Connection search' };
+    if (/^Found actual inode:/i.test(t)) return { kind: 'detail', badge: 'inode', tone: 'success', title: 'Inode resolved' };
+    if (/^Packaging ss-kill/i.test(t)) return { kind: 'detail', badge: 'bundle', tone: 'cmd', title: 'ss-kill bundle' };
+    if (/^Could not build ss-kill bundle/i.test(t)) return { kind: 'detail', badge: 'bundle', tone: 'warn', title: 'ss-kill bundle' };
+    if (/^ss-kill .*check/i.test(t)) return { kind: 'detail', badge: 'check', tone: /ok/i.test(t) ? 'success' : 'warn', title: 'ss-kill availability' };
+    if (/^ss-kill bundle extract/i.test(t)) {
+      const exit = t.match(/exit=(\d+)/);
+      const ok = exit ? exit[1] === '0' : !/error|failed/i.test(t);
+      return { kind: 'output', badge: 'extract', tone: ok ? 'success' : 'error', title: 'Bundle extraction' };
+    }
+    if (/^ss-kill (tcp|udp) exit=/i.test(t)) {
+      const exit = t.match(/exit=(\d+)/);
+      const proto = t.match(/^ss-kill (tcp|udp)/i);
+      const ok = exit ? exit[1] === '0' : false;
+      return { kind: 'output', badge: (proto ? proto[1] : 'ss-kill').toUpperCase(), tone: ok ? 'success' : 'error', title: `ss-kill ${proto ? proto[1].toUpperCase() : ''} attempt`.trim() };
+    }
+    if (/^tcpkill .*output:/i.test(t)) {
+      const ok = /win 0/i.test(t);
+      const err = /error|exception|not installed/i.test(t);
+      return { kind: 'output', badge: 'tcpkill', tone: ok ? 'success' : err ? 'error' : 'info', title: 'tcpkill helper' };
+    }
+    if (/exception|failed/i.test(t)) return { kind: 'detail', badge: 'error', tone: 'error', title: 'Error' };
+    return { kind: 'detail', badge: 'log', tone: 'info', title: 'Debug' };
+  }
+
+  function _renderDebugLines(text) {
+    const lines = String(text).replace(/\r\n/g, '\n').split('\n');
+    return lines.map((line) => {
+      const cls = _debugLineClass(line);
+      return `<span class="debug-line${cls ? ` ${cls}` : ''}">${escapeHtml(line || ' ')}</span>`;
+    }).join('');
+  }
+
+  function renderKillDebug(debugText) {
+    const output = $('#debug-output');
+    const meta = $('#debug-meta');
+    const subtitle = $('#debug-subtitle');
+    const raw = String(debugText || '').trim();
+    if (!raw) {
+      output.innerHTML = '';
+      meta.textContent = 'No debug data';
+      subtitle.textContent = 'No diagnostic trace was returned';
+      return;
+    }
+
+    const _isDebugEntryStart = (s) => /^(NOTICE:|===\s|Connection details:|Connection search output:|Found actual inode:|Packaging ss-kill|Could not build ss-kill bundle|ss-kill .*check:|ss-kill bundle (?:extract|transfer\/extract) |ss-kill (?:tcp|udp) exit=|tcpkill .*output:|tcpkill helper exception:|Container exec exception:)/i.test(s.trim());
+    const entries = [];
+    for (const chunk of raw.split(/\n{2,}/).map((e) => e.trimEnd()).filter((e) => e.trim())) {
+      if (entries.length && !_isDebugEntryStart(chunk)) {
+        entries[entries.length - 1] += '\n\n' + chunk;
+      } else {
+        entries.push(chunk.trim());
+      }
+    }
+    const notice = entries.find((e) => /^NOTICE:/i.test(e));
+    const bodyEntries = entries.filter((e) => !/^NOTICE:/i.test(e));
+
+    const errorCount = bodyEntries.filter((e) => /(\berror\b|\bfailed\b|\bexception\b|exit=\s*[1-9])/i.test(e)).length;
+    const warnCount = bodyEntries.filter((e) => /(\bwarn(?:ing)?\b|\bmissing\b|\btimeout\b)/i.test(e)).length;
+    const successCount = bodyEntries.filter((e) => /(\bok\b|\bkilled\b|win 0|exit=\s*0\b)/i.test(e)).length;
+
+    const detailSuffix = killDebugDetail ? ` · ${killDebugDetail}` : '';
+    subtitle.textContent = `${bodyEntries.length} diagnostic entr${bodyEntries.length === 1 ? 'y' : 'ies'}${detailSuffix}`;
+    meta.textContent = `${bodyEntries.length} entries · ${successCount} ok · ${warnCount} warn · ${errorCount} err`;
+
+    let html = '';
+    if (notice) {
+      html += `<div class="debug-notice"><span class="debug-notice-icon" aria-hidden="true">⚠</span><div>${escapeHtml(notice.replace(/^NOTICE:\s*/i, ''))}</div></div>`;
+    }
+
+    html += bodyEntries.map((entry) => {
+      const info = _classifyDebugEntry(entry);
+      const lines = entry.split('\n');
+      let title = info.title;
+      let body = entry;
+
+      const headerMatch = lines[0].match(/^===\s*(.*?)\s*===?$/);
+      if (headerMatch) {
+        title = headerMatch[1].trim() || title;
+        body = lines.slice(1).join('\n').trim();
+      } else if (/^(Connection search output|tcpkill .*output|ss-kill bundle extract|ss-kill (?:tcp|udp) exit=.+ output):/i.test(lines[0])) {
+        const idx = lines[0].indexOf(':');
+        title = lines[0].slice(0, idx).trim();
+        body = [lines[0].slice(idx + 1).trim(), ...lines.slice(1)].join('\n').trim();
+      }
+
+      const badgeClass = `is-${info.tone || 'info'}`;
+      const bodyHtml = body ? `<pre class="debug-entry-body">${_renderDebugLines(body)}</pre>` : '';
+      return `<section class="debug-entry">
+        <div class="debug-entry-header">
+          <span class="debug-badge ${badgeClass}">${escapeHtml(info.badge)}</span>
+          <span class="debug-entry-title">${escapeHtml(title)}</span>
+        </div>
+        ${bodyHtml}
+      </section>`;
+    }).join('');
+
+    output.innerHTML = html;
+    output.scrollTop = 0;
+  }
 
   function openKillModal(message) {
     killInProgress = true;
     killDebugText = '';
+    killDebugDetail = '';
     $('#kill-title').textContent = 'Kill connection';
     $('#kill-modal-status').textContent = message || 'Preparing…';
     $('#kill-modal-status').className = 'kill-modal-status';
@@ -1567,15 +1688,32 @@
     $('#kill-modal-debug').classList.add('hidden');
     $('#kill-modal-debug').disabled = true;
     $('#kill-modal-close').disabled = true;
+    const debugMeta = $('#debug-meta');
+    const debugSubtitle = $('#debug-subtitle');
+    const debugOutput = $('#debug-output');
+    if (debugMeta) debugMeta.textContent = '';
+    if (debugSubtitle) debugSubtitle.textContent = 'Diagnostic trace for the last kill attempt';
+    if (debugOutput) debugOutput.innerHTML = '';
     $('#kill-modal').classList.remove('hidden');
+  }
+
+  function _formatKillEndpoint(detail) {
+    const text = String(detail || '').trim();
+    const m = text.match(/^(.+?)\s*(?:→|->)\s*(.+)$/);
+    if (!m) return escapeHtml(text);
+    const left = escapeHtml(m[1].trim());
+    const right = escapeHtml(m[2].trim());
+    return `<span class="kill-endpoint"><span class="kill-endpoint-side"><span class="kill-endpoint-label">Local</span><span class="kill-endpoint-value">${left}</span></span><span class="kill-endpoint-arrow" aria-hidden="true">→</span><span class="kill-endpoint-side"><span class="kill-endpoint-label">Remote</span><span class="kill-endpoint-value">${right}</span></span></span>`;
   }
 
   function setKillModal(message, tone = '', detail = '') {
     $('#kill-modal-status').textContent = message;
     $('#kill-modal-status').className = `kill-modal-status${tone ? ` is-${tone}` : ''}`;
     if (detail) {
-      $('#kill-modal-detail').textContent = detail;
-      $('#kill-modal-detail').classList.remove('hidden');
+      killDebugDetail = detail;
+      const detailEl = $('#kill-modal-detail');
+      detailEl.innerHTML = _formatKillEndpoint(detail);
+      detailEl.classList.remove('hidden');
     }
   }
 
@@ -1583,6 +1721,7 @@
     killInProgress = false;
     setKillModal(message, tone, detail);
     killDebugText = debugText || '';
+    killDebugDetail = detail || '';
     $('#kill-modal-debug').classList.toggle('hidden', !killDebugText);
     $('#kill-modal-debug').disabled = !killDebugText;
     $('#kill-modal-close').disabled = false;
@@ -1973,7 +2112,7 @@
             const result = await api('post', `/api/containers/${encodeURIComponent(state.connectionsContainerId)}/connections/kill?${params}`);
             const message = result.message || (result.killed ? 'Connection killed' : 'Kill failed');
             const tone = result.killed ? 'success' : 'error';
-            const notice = 'NOTICE: TCP Kill is available in Premium VIP account ($100,000).';
+            const notice = 'NOTICE: Kill TCP/UDP, dont kill good humans (you not forced to kill erroneous)';
             const debugText = !result.killed
               ? `${notice}\n\n${result.debug && result.debug.length > 0 ? result.debug.join('\n\n') : 'No debug output returned.'}`
               : '';
@@ -1990,7 +2129,7 @@
             if (result.killed) {
               toast('success', message);
             } else {
-              toast('error', message || 'Failed to kill connection - see debug output');
+              toast('error', message || 'Failed to kill connection — see debug log');
             }
           } catch (error) {
             const message = `✘ Kill request failed: ${errorMessage(error)}`;
@@ -2007,16 +2146,36 @@
       }
     });
 
-    $('#debug-close').addEventListener('click', () => {
-      $('#debug-modal').classList.add('hidden');
+    const closeDebugModal = () => $('#debug-modal').classList.add('hidden');
+    $('#debug-close').addEventListener('click', closeDebugModal);
+    $('#debug-close-btn').addEventListener('click', closeDebugModal);
+    $('#debug-modal').addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) closeDebugModal();
     });
-    $('#debug-close-btn').addEventListener('click', () => {
-      $('#debug-modal').classList.add('hidden');
+    $('#debug-copy-btn').addEventListener('click', async () => {
+      if (!killDebugText) return;
+      const btn = $('#debug-copy-btn');
+      const original = btn.textContent;
+      try {
+        await navigator.clipboard.writeText(killDebugText);
+        btn.textContent = 'Copied';
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = killDebugText;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        btn.textContent = 'Copied';
+      }
+      setTimeout(() => { btn.textContent = original; }, 1500);
     });
     $('#kill-modal-close').addEventListener('click', closeKillModal);
     $('#kill-modal-debug').addEventListener('click', () => {
       if (!killDebugText) return;
-      $('#debug-output').textContent = killDebugText;
+      renderKillDebug(killDebugText);
       $('#debug-modal').classList.remove('hidden');
       closeKillModal();
     });

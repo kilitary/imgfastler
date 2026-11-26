@@ -40,7 +40,6 @@ import socket
 import struct
 import subprocess
 import tarfile
-import zipfile
 import threading
 import time
 import urllib.error
@@ -48,6 +47,7 @@ import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 import docker
@@ -126,7 +126,7 @@ logging.basicConfig(
 
 # --- app ---------------------------------------------------------------net
 
-app = FastAPI(title="imgfastler backend", version="0.0.3")
+app = FastAPI(title="imgfastler backend", version="0.0.8")
 app.add_middleware(
     CORSMiddleware,
     # The extension UI is served by Docker Desktop, requests are proxied to
@@ -428,90 +428,35 @@ def _self_container_ids() -> list[str]:
     return identifiers
 
 
-def _build_ss_kill_bundle_zip() -> tuple[bytes, str] | None:
-    """Package host `ss-kill` binary with shared-library dependencies into a zip.
+_SS_KILL_BUNDLE_CANDIDATES = (
+    os.environ.get("IMGFASTLER_SS_KILL_BUNDLE", "").strip(),
+    "/opt/imgfastler/ss-kill/bundle.zip",
+    "/opt/imgfastler/bundle.zip",
+    os.path.join(os.path.dirname(__file__), "ss-kill", "bundle.zip"),
+    os.path.join(os.path.dirname(__file__), "..", "ss-kill", "bundle.zip"),
+    os.path.join(os.getcwd(), "ss-kill", "bundle.zip"),
+)
 
-    Returns (zip_bytes, binary_name) or None when ss-kill cannot be resolved.
+
+def _load_ss_kill_bundle_zip() -> tuple[bytes, str] | None:
+    """Load the prebuilt ss-kill bundle zip.
+
+    The bundle is shipped statically (ss-kill/bundle.zip) and is not built at
+    runtime. Returns (zip_bytes, binary_name) or None when unavailable.
     """
-    candidates: list[str] = []
-    found = shutil.which("ss-kill")
-    if found:
-        candidates.append(found)
-    candidates.extend(
-        [
-            "/usr/local/bin/ss-kill",
-            "/usr/bin/ss-kill",
-            "/opt/imgfastler/ss-kill",
-            os.path.join(os.path.dirname(__file__), "..", "ss-kill-src", "ss-kill"),
-            os.path.join(os.getcwd(), "ss-kill-src", "ss-kill"),
-        ]
-    )
-    ss_kill_path: str | None = None
-    for candidate in candidates:
-        candidate = os.path.realpath(candidate)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            ss_kill_path = candidate
-            break
-    if not ss_kill_path:
-        return None
-
-    files: dict[str, str] = {}
-    files["ss-kill"] = ss_kill_path
-
-    try:
-        ldd = subprocess.run(
-            ["ldd", ss_kill_path],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        ldd_out = (ldd.stdout or "") + "\n" + (ldd.stderr or "")
-    except Exception:
-        ldd_out = ""
-
-    for line in ldd_out.splitlines():
-        line = line.strip()
-        if not line or "linux-vdso" in line or "not a dynamic executable" in line.lower():
+    for candidate in _SS_KILL_BUNDLE_CANDIDATES:
+        if not candidate:
             continue
-        soname = line.split()[0] if line.split() else ""
-        match = re.search(r"=>\s*(/\S+)", line)
-        if match:
-            lib_path = match.group(1)
-        elif line.startswith("/"):
-            lib_path = line.split()[0]
-        else:
+        path = os.path.realpath(candidate)
+        if not os.path.isfile(path):
             continue
-        if os.path.isfile(lib_path):
-            real = os.path.realpath(lib_path)
-            for name in {
-                os.path.basename(real),
-                os.path.basename(lib_path),
-                soname if soname and not soname.startswith("/") else "",
-            }:
-                if name:
-                    files[f"lib/{name}"] = real
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for arcname, src in files.items():
-            try:
-                zf.write(src, arcname)
-            except OSError:
-                continue
-        zf.writestr(
-            "run_ss_kill.sh",
-            "#!/bin/sh\n"
-            'DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\n'
-            'for LD in "$DIR"/lib/ld-linux*.so.* "$DIR"/lib/ld-*.so.*; do\n'
-            '  if [ -x "$LD" ]; then\n'
-            '    exec "$LD" --library-path "$DIR/lib" "$DIR/ss-kill" "$@"\n'
-            '  fi\n'
-            'done\n'
-            'LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" '
-            'exec "$DIR/ss-kill" "$@"\n',
-        )
-    return buf.getvalue(), "ss-kill"
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            continue
+        if data:
+            return data, "ss-kill"
+    return None
 
 
 def _find_helper_image(client: docker.DockerClient) -> str:
@@ -688,7 +633,7 @@ done
                 path = f"/proc/net/{filename}"
                 cmd = (
                     f"echo '__IMFASTLER_{filename}__'; "
-                    f"while IFS= read -r line || [ -n \"$line\" ]; do printf '%s\\n' \"$line\"; done < {path} 2>/dev/null"
+                    f'while IFS= read -r line || [ -n "$line" ]; do printf \'%s\\n\' "$line"; done < {path} 2>/dev/null'
                 )
                 part = container.exec_run(["/bin/sh", "-c", cmd], privileged=True)
                 content = part[1].decode("utf-8", "replace") if part[1] else ""
@@ -1810,7 +1755,9 @@ def kill_connection(
             value is None
             for value in (local_address, local_port, remote_address, remote_port)
         ):
-            log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
+            log.info(
+                "kill_connection %s debug:\n%s", container_id, "\n".join(debug_info)
+            )
             return {
                 "inode": inode,
                 "killed": False,
@@ -1871,12 +1818,18 @@ def kill_connection(
 
             # Method 2: Try ss-kill tool (socket-level kill via SOCK_DESTROY)
             ss_kill_bin = "/usr/local/bin/ss-kill"
-            debug_info.append("Packaging ss-kill from host with dependencies...")
-            bundle = _build_ss_kill_bundle_zip()
+            debug_info.append("Loading static ss-kill bundle (ss-kill/bundle.zip)...")
+            bundle = _load_ss_kill_bundle_zip()
             if not bundle:
-                debug_info.append("Could not build ss-kill bundle on host (ss-kill missing).")
+                debug_info.append(
+                    "Static ss-kill bundle not found (expected ss-kill/bundle.zip)."
+                )
                 ss_kill_check = container.exec_run(
-                    ["/bin/sh", "-c", f"test -x {ss_kill_bin} && echo ok || echo missing"],
+                    [
+                        "/bin/sh",
+                        "-c",
+                        f"test -x {ss_kill_bin} && echo ok || echo missing",
+                    ],
                     privileged=True,
                 )
                 ss_kill_status = (
@@ -1943,7 +1896,11 @@ WRAP
                     debug_info.append(f"ss-kill bundle transfer/extract failed: {exc}")
 
                 ss_kill_check = container.exec_run(
-                    ["/bin/sh", "-c", f"test -x {ss_kill_bin} && echo ok || echo missing"],
+                    [
+                        "/bin/sh",
+                        "-c",
+                        f"test -x {ss_kill_bin} && echo ok || echo missing",
+                    ],
                     privileged=True,
                 )
                 ss_kill_status = (
@@ -1964,9 +1921,15 @@ WRAP
                         ["/bin/sh", "-c", f"{cmd} 2>&1"], privileged=True
                     )
                     output = result[1].decode("utf-8", "replace") if result[1] else ""
-                    debug_info.append(f"ss-kill {proto} exit={result[0]} output:\n{output}")
+                    debug_info.append(
+                        f"ss-kill {proto} exit={result[0]} output:\n{output}"
+                    )
                     if result[0] == 0:
-                        log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
+                        log.info(
+                            "kill_connection %s debug:\n%s",
+                            container_id,
+                            "\n".join(debug_info),
+                        )
                         return {
                             "inode": inode,
                             "killed": True,
@@ -1992,7 +1955,11 @@ WRAP
                     container, tcpkill_filter, debug_info
                 )
                 if tcpkill_result and tcpkill_result["killed"]:
-                    log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
+                    log.info(
+                        "kill_connection %s debug:\n%s",
+                        container_id,
+                        "\n".join(debug_info),
+                    )
                     return {"inode": inode, "debug": debug_info, **tcpkill_result}
 
             # Method 4: run tcpkill from the helper image in a container
@@ -2031,7 +1998,11 @@ WRAP
                     # tcpkill prints "<addr:lport> > <addr:lport>: R seq:... win 0"
                     # for every injected reset.
                     if "win 0" in kill_output:
-                        log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
+                        log.info(
+                            "kill_connection %s debug:\n%s",
+                            container_id,
+                            "\n".join(debug_info),
+                        )
                         return {
                             "inode": inode,
                             "killed": True,
@@ -2047,7 +2018,9 @@ WRAP
                         except DockerException:
                             pass
 
-            log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
+            log.info(
+                "kill_connection %s debug:\n%s", container_id, "\n".join(debug_info)
+            )
             return {
                 "inode": inode,
                 "killed": False,
@@ -2056,7 +2029,9 @@ WRAP
             }
         except Exception as e:
             debug_info.append(f"Container exec exception: {str(e)}")
-            log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
+            log.info(
+                "kill_connection %s debug:\n%s", container_id, "\n".join(debug_info)
+            )
             return {
                 "inode": inode,
                 "killed": False,
