@@ -40,6 +40,7 @@ import socket
 import struct
 import subprocess
 import tarfile
+import zipfile
 import threading
 import time
 import urllib.error
@@ -427,6 +428,80 @@ def _self_container_ids() -> list[str]:
     return identifiers
 
 
+def _build_ss_bundle_zip() -> tuple[bytes, str] | None:
+    """Package host `ss` binary with shared-library dependencies into a zip.
+
+    Returns (zip_bytes, ss_binary_name) or None when ss/ldd cannot be resolved.
+    """
+    ss_path = shutil.which("ss")
+    if not ss_path:
+        for candidate in ("/usr/sbin/ss", "/sbin/ss", "/usr/bin/ss", "/bin/ss"):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                ss_path = candidate
+                break
+    if not ss_path:
+        return None
+
+    files: dict[str, str] = {}
+    ss_path = os.path.realpath(ss_path)
+    files[os.path.basename(ss_path)] = ss_path
+
+    try:
+        ldd = subprocess.run(
+            ["ldd", ss_path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        ldd_out = (ldd.stdout or "") + "\n" + (ldd.stderr or "")
+    except Exception:
+        ldd_out = ""
+
+    for line in ldd_out.splitlines():
+        line = line.strip()
+        if not line or "linux-vdso" in line:
+            continue
+        soname = line.split()[0] if line.split() else ""
+        match = re.search(r"=>\s*(/\S+)", line)
+        if match:
+            lib_path = match.group(1)
+        elif line.startswith("/"):
+            lib_path = line.split()[0]
+        else:
+            continue
+        if os.path.isfile(lib_path):
+            real = os.path.realpath(lib_path)
+            for name in {
+                os.path.basename(real),
+                os.path.basename(lib_path),
+                soname if soname.startswith("/") is False and soname else "",
+            }:
+                if name:
+                    files[f"lib/{name}"] = real
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for arcname, src in files.items():
+            try:
+                zf.write(src, arcname)
+            except OSError:
+                continue
+        zf.writestr(
+            "run_ss.sh",
+            "#!/bin/sh\n"
+            'DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\n'
+            'for LD in "$DIR"/lib/ld-linux*.so.* "$DIR"/lib/ld-*.so.*; do\n'
+            '  if [ -x "$LD" ]; then\n'
+            '    exec "$LD" --library-path "$DIR/lib" "$DIR/ss" "$@"\n'
+            '  fi\n'
+            'done\n'
+            'LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" '
+            'exec "$DIR/ss" "$@"\n',
+        )
+    return buf.getvalue(), os.path.basename(ss_path)
+
+
 def _find_helper_image(client: docker.DockerClient) -> str:
     """Locate an image with a shell to run the ``/proc/net`` helper.
 
@@ -580,20 +655,34 @@ def _tcpkill_in_container(
 def _dump_container_sockets(container: Any) -> str:
     """Read ``/proc/net/{tcp,tcp6,udp,udp6}`` from a container's netns using docker exec."""
     try:
-        # Use docker exec to read the files directly from the container
-        output_parts = []
-        for filename in PROC_NET_FILES:
-            path = f"/proc/net/{filename}"
-            try:
-                result = container.exec_run(["cat", path], privileged=True)
-                content = result[1].decode("utf-8", "replace") if result[1] else ""
-                output_parts.append(f"__IMFASTLER_{filename}__\n{content}")
-            except Exception as e:
-                output_parts.append(
-                    f"__IMFASTLER_{filename}__\n# Error reading {path}: {str(e)}"
+        script = r"""
+for f in tcp tcp6 udp udp6; do
+  echo "__IMFASTLER_${f}__"
+  p="/proc/net/$f"
+  if [ -r "$p" ]; then
+    cat "$p" 2>/dev/null \
+      || /bin/cat "$p" 2>/dev/null \
+      || busybox cat "$p" 2>/dev/null \
+      || while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$p"
+  fi
+done
+"""
+        result = container.exec_run(["/bin/sh", "-c", script], privileged=True)
+        output = result[1].decode("utf-8", "replace") if result[1] else ""
+        if result[0] != 0 and not output.strip():
+            # Fallback: try one file at a time with shell builtins
+            output_parts = []
+            for filename in PROC_NET_FILES:
+                path = f"/proc/net/{filename}"
+                cmd = (
+                    f"echo '__IMFASTLER_{filename}__'; "
+                    f"while IFS= read -r line || [ -n \"$line\" ]; do printf '%s\\n' \"$line\"; done < {path} 2>/dev/null"
                 )
-
-        return "\n".join(output_parts)
+                part = container.exec_run(["/bin/sh", "-c", cmd], privileged=True)
+                content = part[1].decode("utf-8", "replace") if part[1] else ""
+                output_parts.append(content)
+            output = "\n".join(output_parts)
+        return output
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -1709,6 +1798,7 @@ def kill_connection(
             value is None
             for value in (local_address, local_port, remote_address, remote_port)
         ):
+            log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
             return {
                 "inode": inode,
                 "killed": False,
@@ -1774,21 +1864,141 @@ def kill_connection(
             ss_available = ss_check[1].decode("utf-8", "replace").strip()
             debug_info.append(f"ss check: {ss_available}")
 
+            ss_bin = "ss"
             if "ss not found" not in ss_available:
+                ss_test = container.exec_run(
+                    ["/bin/sh", "-c", "ss -h >/dev/null 2>&1; echo __EC=$?__"],
+                    privileged=True,
+                )
+                ss_test_out = (
+                    ss_test[1].decode("utf-8", "replace") if ss_test[1] else ""
+                )
+                debug_info.append(f"ss test: {ss_test_out.strip()}")
+                if "__EC=0__" not in ss_test_out and "__EC=1__" not in ss_test_out:
+                    debug_info.append("ss found but not runnable; removing stale wrapper and re-bundling.")
+                    container.exec_run(
+                        ["/bin/sh", "-c", "rm -f /usr/local/bin/ss /tmp/imgfastler_ss_bundle.zip; rm -rf /tmp/imgfastler-ss"],
+                        privileged=True,
+                    )
+                    ss_available = "ss not found"
+            if "ss not found" in ss_available:
+                debug_info.append("ss not found; packaging ss from host with dependencies...")
+                bundle = _build_ss_bundle_zip()
+                if not bundle:
+                    debug_info.append("Could not build ss bundle on host (ss/ldd missing).")
+                else:
+                    zip_bytes, ss_name = bundle
+                    tar_buf = io.BytesIO()
+                    with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+                        info = tarfile.TarInfo(name="imgfastler_ss_bundle.zip")
+                        info.size = len(zip_bytes)
+                        info.mtime = int(time.time())
+                        tar.addfile(info, io.BytesIO(zip_bytes))
+                    tar_buf.seek(0)
+                    try:
+                        container.put_archive("/tmp", tar_buf.getvalue())
+                        extract_cmd = r"""
+                        set -e
+                        BUNDLE=/tmp/imgfastler_ss_bundle.zip
+                        DEST=/tmp/imgfastler-ss
+                        rm -rf "$DEST" && mkdir -p "$DEST"
+                        if command -v python3 >/dev/null 2>&1; then
+                            python3 -c "import zipfile; zipfile.ZipFile('$BUNDLE').extractall('$DEST')"
+                        elif command -v python >/dev/null 2>&1; then
+                            python -c "import zipfile; zipfile.ZipFile('$BUNDLE').extractall('$DEST')"
+                        elif command -v unzip >/dev/null 2>&1; then
+                            unzip -o "$BUNDLE" -d "$DEST"
+                        elif command -v busybox >/dev/null 2>&1; then
+                            busybox unzip -o "$BUNDLE" -d "$DEST"
+                        else
+                            echo "No zip extractor found"
+                            exit 1
+                        fi
+                        chmod +x "$DEST"/ss "$DEST"/run_ss.sh "$DEST"/lib/* 2>/dev/null || true
+                        mkdir -p /usr/local/bin 2>/dev/null || true
+                        cat > /usr/local/bin/ss <<'WRAP'
+#!/bin/sh
+DIR=/tmp/imgfastler-ss
+for LD in "$DIR"/lib/ld-linux*.so.* "$DIR"/lib/ld-*.so.*; do
+  if [ -x "$LD" ]; then
+    exec "$LD" --library-path "$DIR/lib" "$DIR/ss" "$@"
+  fi
+done
+LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$DIR/ss" "$@"
+WRAP
+                        chmod +x /usr/local/bin/ss 2>/dev/null || true
+                        command -v ss || echo /usr/local/bin/ss
+                        """
+                        extract_result = container.exec_run(
+                            ["/bin/sh", "-c", extract_cmd], privileged=True
+                        )
+                        extract_output = (
+                            extract_result[1].decode("utf-8", "replace")
+                            if extract_result[1]
+                            else ""
+                        )
+                        debug_info.append(
+                            f"ss bundle extract exit={extract_result[0]} output:\n{extract_output}"
+                        )
+                    except Exception as exc:
+                        debug_info.append(f"ss bundle transfer/extract failed: {exc}")
+
+                ss_recheck = container.exec_run(
+                    ["sh", "-c", "command -v ss || echo 'ss not found'"],
+                    privileged=True,
+                )
+                ss_available = ss_recheck[1].decode("utf-8", "replace").strip()
+                debug_info.append(f"ss recheck: {ss_available}")
+                if "ss not found" in ss_available:
+                    wrapper_check = container.exec_run(
+                        ["/bin/sh", "-c", "test -x /usr/local/bin/ss && echo ok || echo missing"],
+                        privileged=True,
+                    )
+                    wrapper_status = (
+                        wrapper_check[1].decode("utf-8", "replace").strip()
+                        if wrapper_check[1]
+                        else "missing"
+                    )
+                    debug_info.append(f"ss wrapper check: {wrapper_status}")
+                    if "ok" in wrapper_status:
+                        ss_bin = "/usr/local/bin/ss"
+                    else:
+                        ss_bin = ""
+
+            has_ss = "ss not found" not in ss_available or bool(ss_bin)
+            if has_ss:
+                la = shlex.quote(str(local_address))
+                ra = shlex.quote(str(remote_address))
+                lp = int(local_port)
+                rp = int(remote_port)
+                ss_filter = (
+                    f"( sport = :{lp} and dport = :{rp} and src {str(local_address)} and dst {str(remote_address)} )"
+                )
                 ss_cmds = [
-                    f'ss -K "inode = {actual_inode or inode}"',
-                    f'ss -K "( sport = :{local_port} and dport = :{remote_port} )"',
-                    f'ss -K "src {local_address}:{local_port} dst {remote_address}:{remote_port}"',
-                    f'ss -K "local {local_address}:{local_port} peer {remote_address}:{remote_port}"',
+                    f"{ss_bin} -K -t dst {ra} dport = {rp} src {la} sport = {lp}",
+                    f"{ss_bin} -K -t src {la} sport = {lp} dst {ra} dport = {rp}",
+                    f"{ss_bin} -K dst {ra} dport = {rp} src {la} sport = {lp}",
+                    f"{ss_bin} -K -u dst {ra} dport = {rp} src {la} sport = {lp}",
+                    f"{ss_bin} -K -t {shlex.quote(ss_filter)}",
                 ]
                 for i, cmd in enumerate(ss_cmds, 1):
                     result = container.exec_run(
                         ["/bin/sh", "-c", f"{cmd} 2>&1"], privileged=True
                     )
                     output = result[1].decode("utf-8", "replace") if result[1] else ""
-                    debug_info.append(f"ss -K command {i} output:\n{output}")
+                    debug_info.append(f"ss -K command {i} exit={result[0]} output:\n{output}")
 
-                    if result[0] == 0 and "killed" in output.lower():
+                    lower_out = output.lower()
+                    error_markers = (
+                        "rtnetlink answers",
+                        "error:",
+                        "cannot parse",
+                        "invalid argument",
+                        "operation not supported",
+                        "usage:",
+                    )
+                    if result[0] == 0 and not any(marker in lower_out for marker in error_markers):
+                        log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
                         return {
                             "inode": inode,
                             "killed": True,
@@ -1814,6 +2024,7 @@ def kill_connection(
                     container, tcpkill_filter, debug_info
                 )
                 if tcpkill_result and tcpkill_result["killed"]:
+                    log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
                     return {"inode": inode, "debug": debug_info, **tcpkill_result}
 
             # Method 4: run tcpkill from the helper image in a container
@@ -1852,6 +2063,7 @@ def kill_connection(
                     # tcpkill prints "<addr:lport> > <addr:lport>: R seq:... win 0"
                     # for every injected reset.
                     if "win 0" in kill_output:
+                        log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
                         return {
                             "inode": inode,
                             "killed": True,
@@ -1867,6 +2079,7 @@ def kill_connection(
                         except DockerException:
                             pass
 
+            log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
             return {
                 "inode": inode,
                 "killed": False,
@@ -1875,6 +2088,7 @@ def kill_connection(
             }
         except Exception as e:
             debug_info.append(f"Container exec exception: {str(e)}")
+            log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
             return {
                 "inode": inode,
                 "killed": False,
@@ -1885,6 +2099,7 @@ def kill_connection(
     except HTTPException:
         raise
     except Exception as exc:
+        log.info("kill_connection %s debug:\n%s", container_id, "\n".join(debug_info))
         raise HTTPException(
             status_code=500,
             detail=f"Failed to kill connection: {str(exc)}\nDebug info: {debug_info}",

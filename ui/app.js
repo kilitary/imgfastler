@@ -2018,6 +2018,7 @@
       if (!killDebugText) return;
       $('#debug-output').textContent = killDebugText;
       $('#debug-modal').classList.remove('hidden');
+      closeKillModal();
     });
     $('#kill-modal').addEventListener('click', (event) => {
       if (event.target === event.currentTarget) closeKillModal();

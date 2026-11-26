@@ -4,6 +4,7 @@ Guidance for AI agents working on this repository.
 
 - read all md files to understand structure
 - read all codebase before assigning code changes 
+- when writing code logic, be sure for your decisions, test all pathes it can go, analyze all variants of input vector going to routines.
 
 ## What this is
 
