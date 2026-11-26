@@ -487,7 +487,7 @@
                         class="search"
                         id="connection-search"
                         type="search"
-                        placeholder="Filter by protocol, state, address, port or resolved name…"
+                        placeholder="Filter by protocol, state, address, port, PID, process or resolved name…"
                         autocomplete="off"
                         aria-label="Filter connections"
                     />
@@ -507,6 +507,8 @@
                                 <th>State</th>
                                 <th>Local</th>
                                 <th>Remote</th>
+                                <th>PID</th>
+                                <th>Process</th>
                                 <th>UID</th>
                                 <th>Inode</th>
                                 <th>RxQ</th>
@@ -516,7 +518,7 @@
                         </thead>
                         <tbody id="connections-body">
                             <tr class="row-loading">
-                                <td colspan="10">Loading connections…</td>
+                                <td colspan="12">Loading connections…</td>
                             </tr>
                         </tbody>
                     </table>

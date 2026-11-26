@@ -126,7 +126,7 @@ logging.basicConfig(
 
 # --- app ---------------------------------------------------------------net
 
-app = FastAPI(title="imgfastler backend", version="0.0.8")
+app = FastAPI(title="imgfastler backend", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     # The extension UI is served by Docker Desktop, requests are proxied to
@@ -406,6 +406,28 @@ def _parse_proc_net(text: str) -> list[dict[str, Any]]:
     return connections
 
 
+def _parse_proc_inode_map(text: str) -> dict[str, dict[str, str]]:
+    """Parse ``__IMFASTLER_procs__`` section mapping socket inodes to process info."""
+    inode_map: dict[str, dict[str, str]] = {}
+    section = ""
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith(NET_SECTION_PREFIX) and line.endswith("__"):
+            section = line[len(NET_SECTION_PREFIX) : -2]
+            continue
+        if section != "procs" or not line:
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        inode, pid, comm = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        if not inode or inode == "0" or not pid:
+            continue
+        # Keep first mapping; same inode may appear via multiple fds.
+        inode_map.setdefault(inode, {"pid": pid, "process": comm or "?"})
+    return inode_map
+
+
 def _self_container_ids() -> list[str]:
     """Best-effort list of identifiers that may resolve to this container."""
     identifiers: list[str] = []
@@ -610,7 +632,8 @@ def _tcpkill_in_container(
 
 
 def _dump_container_sockets(container: Any) -> str:
-    """Read ``/proc/net/{tcp,tcp6,udp,udp6}`` from a container's netns using docker exec."""
+    """Read ``/proc/net/{tcp,tcp6,udp,udp6}`` and socket->process mappings
+    from a container's netns using docker exec."""
     try:
         script = r"""
 for f in tcp tcp6 udp udp6; do
@@ -623,6 +646,26 @@ for f in tcp tcp6 udp udp6; do
       || while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$p"
   fi
 done
+echo "__IMFASTLER_procs__"
+for p in /proc/[0-9]*; do
+  pid=${p#/proc/}
+  [ -d "$p/fd" ] || continue
+  comm=""
+  for fd in "$p"/fd/*; do
+    target=$(readlink "$fd" 2>/dev/null) || continue
+    case "$target" in
+      socket:\[*\])
+        ino=${target#socket:[}
+        ino=${ino%]}
+        if [ -z "$comm" ]; then
+          comm=$(cat "$p/comm" 2>/dev/null)
+          [ -n "$comm" ] || comm="?"
+        fi
+        printf '%s\t%s\t%s\n' "$ino" "$pid" "$comm"
+        ;;
+    esac
+  done
+done 2>/dev/null
 """
         result = container.exec_run(["/bin/sh", "-c", script], privileged=True)
         output = result[1].decode("utf-8", "replace") if result[1] else ""
@@ -638,6 +681,16 @@ done
                 part = container.exec_run(["/bin/sh", "-c", cmd], privileged=True)
                 content = part[1].decode("utf-8", "replace") if part[1] else ""
                 output_parts.append(content)
+            proc_cmd = (
+                "echo '__IMFASTLER_procs__'; "
+                "for p in /proc/[0-9]*; do pid=${p#/proc/}; [ -d \"$p/fd\" ] || continue; comm=''; "
+                "for fd in \"$p\"/fd/*; do target=$(readlink \"$fd\" 2>/dev/null) || continue; "
+                "case \"$target\" in socket:\\[*\\]) ino=${target#socket:[}; ino=${ino%]}; "
+                "if [ -z \"$comm\" ]; then comm=$(cat \"$p/comm\" 2>/dev/null); [ -n \"$comm\" ] || comm='?'; fi; "
+                "printf '%s\\t%s\\t%s\\n' \"$ino\" \"$pid\" \"$comm\";; esac; done; done 2>/dev/null"
+            )
+            part = container.exec_run(["/bin/sh", "-c", proc_cmd], privileged=True)
+            output_parts.append(part[1].decode("utf-8", "replace") if part[1] else "")
             output = "\n".join(output_parts)
         return output
     except Exception as exc:
@@ -1299,6 +1352,7 @@ def container_connections(
         (raw_output or "")[:200],
     )
     connections = _parse_proc_net(raw_output)
+    inode_procs = _parse_proc_inode_map(raw_output)
     ip_name_map = _build_ip_name_map(client)
     # Resolve every unique address in parallel: the PTR fallback waits up to
     # PTR_QUERY_TIMEOUT per resolver, which must not be paid per connection.
@@ -1308,7 +1362,7 @@ def container_connections(
         for address in (connection["local_address"], connection["remote_address"])
         if address and address not in {"0.0.0.0", "::"}
     }
-    resolved: dict[str, str] = {}
+    resolved_names: dict[str, str] = {}
     if unique_addresses:
         ordered = sorted(unique_addresses)
         with ThreadPoolExecutor(max_workers=16) as pool:
@@ -1320,18 +1374,57 @@ def container_connections(
                 ),
                 strict=True,
             ):
-                resolved[address] = name
+                resolved_names[address] = name
+    procs_section_present = "__IMFASTLER_procs__" in (raw_output or "")
     for connection in connections:
-        connection["local_resolved"] = resolved.get(
+        connection["local_resolved"] = resolved_names.get(
             connection["local_address"], connection["local_address"]
         )
-        connection["remote_resolved"] = resolved.get(
+        connection["remote_resolved"] = resolved_names.get(
             connection["remote_address"], connection["remote_address"]
         )
+        inode = str(connection.get("inode", "") or "")
+        proc = inode_procs.get(inode)
+        pid_val = proc.get("pid", "") if proc else ""
+        process_val = proc.get("process", "") if proc else ""
+        connection["pid"] = int(pid_val) if pid_val.isdigit() else None
+        connection["process"] = process_val
+
+        if connection["pid"] is None or not connection["process"]:
+            if not procs_section_present:
+                reason = "proc mapping section '__IMFASTLER_procs__' missing from exec output"
+            elif not inode or inode == "0":
+                reason = f"socket inode is empty/zero (inode={inode!r})"
+            elif proc is None:
+                reason = (
+                    f"no /proc/*/fd socket mapping for inode {inode} "
+                    f"(parsed_proc_mappings={len(inode_procs)})"
+                )
+            elif connection["pid"] is None and not connection["process"]:
+                reason = f"proc mapping found for inode {inode} but pid/process are empty"
+            elif connection["pid"] is None:
+                reason = f"proc mapping found for inode {inode} but pid is missing/invalid: {pid_val!r}"
+            else:
+                reason = f"proc mapping found for inode {inode} but process name is empty"
+            log.warning(
+                "container_connections: %s missing process info: %s %s:%s -> %s:%s inode=%s pid=%r process=%r reason=%s",
+                container_id,
+                connection.get("protocol"),
+                connection.get("local_address"),
+                connection.get("local_port"),
+                connection.get("remote_address"),
+                connection.get("remote_port"),
+                inode,
+                connection["pid"],
+                connection["process"],
+                reason,
+            )
     log.info(
-        "container_connections: %s -> %d connections",
+        "container_connections: %s -> %d connections (%d with process info, %d missing)",
         container_id,
         len(connections),
+        sum(1 for c in connections if c.get("pid") is not None and c.get("process")),
+        sum(1 for c in connections if c.get("pid") is None or not c.get("process")),
     )
     if not connections and raw_output and len(raw_output.strip()) > 0:
         log.warning(

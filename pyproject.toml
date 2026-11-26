@@ -1,6 +1,6 @@
 [project]
 name = "imgfastler"
-version = "0.0.8"
+version = "0.1.0"
 description = "Durable Docker Desktop extension fur manipulate, create, administrate images, containers, networks and volumes with advanced unfound (at build_time) capabilates"
 requires-python = ">=3.12"
 dependencies = [

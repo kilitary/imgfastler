@@ -48,12 +48,30 @@ Use this file as the chronological record of work performed, files changed, vali
   - backend/tests/test_create_container.py (updated)
   - task_plan.md, findings.md, progress.md (updated)
 
+### Feature: process name and PID in connections table (2026-11-26)
+
+- **Status:** complete
+- Actions taken:
+  - Extended `_dump_container_sockets()` to emit `__IMFASTLER_procs__` section mapping socket inodes to `pid\tcomm` from `/proc/[pid]/fd`.
+  - Added `_parse_proc_inode_map()` and enriched `/api/containers/{id}/connections` results with `pid` (int|null) and `process` (str).
+  - Updated UI connections table: added PID and Process columns, updated colspans, search haystack, placeholder, and row rendering.
+  - Bumped version to 0.1.0 in `pyproject.toml` and FastAPI app.
+  - Updated README connections description.
+- Files created/modified:
+  - backend/server.py (updated)
+  - ui/app.js (updated)
+  - ui/index.html (updated)
+  - pyproject.toml (updated)
+  - README.md (updated)
+  - task_plan.md, progress.md (updated)
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
 | pytest backend/tests/test_create_container.py | host network cases | 4 new tests pass, no regressions | 27 passed, 1 warning | pass |
 | make check | syntax | ok | py_compile server.py, metadata.json OK | pass |
+| node --check ui/app.js | syntax | ok | OK | pass |
 | ruff check backend/server.py backend/tests/test_create_container.py | lint changed files | no new errors | 6 pre-existing errors in server.py (unchanged lines) | pass (no regressions) |
 
 ## Error Log
@@ -66,11 +84,11 @@ Use this file as the chronological record of work performed, files changed, vali
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Network edit fix applied and init sixed |
-| Where am I going? | Await user verification / follow-up; optional: `submitCreate` toast uses stale editContainerId, `none` network backend guard |
-| What's the goal? | Fix network setup on container edit page (bridge -> host) |
-| What have I learned? | See findings.md (renderNetworks clobber, host constraints) |
-| What have I done? | UI+backend fixes, 4 new tests, all 27 backend tests pass |
+| Where am I? | Connections table now includes PID and process name |
+| Where am I going? | Await user verification / follow-up |
+| What's the goal? | Add process name and process ID to connections table |
+| What have I learned? | Socket inode->process mapping can be collected via `/proc/[pid]/fd` readlink scan in container exec; expose as extra dump section for parsing |
+| What have I done? | Backend dump/parser/enrichment, UI table/cols/search/render, README update, version bump to 0.1.0, syntax checks pass |
 
 ---
 

@@ -939,7 +939,7 @@
 
     const body = $('#connections-body');
     body.innerHTML =
-      '<tr class="row-loading"><td colspan="10">Loading connections…</td></tr>';
+      '<tr class="row-loading"><td colspan="12">Loading connections…</td></tr>';
     $('#connections-error').classList.add('hidden');
     $('#connections-summary').innerHTML = '';
     $('#connections-notes').innerHTML = '';
@@ -1026,7 +1026,7 @@
     const query = $('#connection-search').value.trim().toLowerCase();
     const filtered = connections.filter((c) => {
       if (!query) return true;
-      const haystack = `${c.protocol} ${c.family} ${c.state} ${c.local_address}:${c.local_port} ${c.remote_address}:${c.remote_port} ${c.uid} ${c.inode} ${c.rx_queue} ${c.tx_queue} ${
+      const haystack = `${c.protocol} ${c.family} ${c.state} ${c.local_address}:${c.local_port} ${c.remote_address}:${c.remote_port} ${c.pid ?? ''} ${c.process || ''} ${c.uid} ${c.inode} ${c.rx_queue} ${c.tx_queue} ${
         c.local_resolved || ''
       } ${c.remote_resolved || ''}`.toLowerCase();
       return haystack.includes(query);
@@ -1044,6 +1044,8 @@
         const local = `${escapeHtml(localHost)}:${escapeHtml(c.local_port)}`;
         const remote = `${escapeHtml(remoteHost)}:${escapeHtml(c.remote_port)}`;
         const canKill = c.state === 'ESTABLISHED' || c.state === 'LISTEN';
+        const pid = c.pid != null && c.pid !== '' ? String(c.pid) : '';
+        const process = c.process || '';
         return `
           <tr data-inode="${escapeHtml(c.inode)}" data-local-address="${escapeHtml(c.local_address)}" data-local-port="${escapeHtml(c.local_port)}" data-remote-address="${escapeHtml(c.remote_address)}" data-remote-port="${escapeHtml(c.remote_port)}">
             <td>${escapeHtml(c.protocol)}</td>
@@ -1053,6 +1055,8 @@
             }" title="State code: ${escapeHtml(c.state_code || '')}">${escapeHtml(c.state)}</span></td>
             <td title="${escapeHtml(c.local_address)}">${local}</td>
             <td title="${escapeHtml(c.remote_address)}">${remote}</td>
+            <td class="mono" title="Process ID">${pid ? escapeHtml(pid) : '<span class="muted">—</span>'}</td>
+            <td title="Process name">${process ? escapeHtml(process) : '<span class="muted">—</span>'}</td>
             <td title="User ID">${escapeHtml(c.uid)}${String(c.uid) === '0' ? ' <span class="muted">(root)</span>' : ''}</td>
             <td class="mono">${escapeHtml(c.inode)}</td>
             <td class="mono" title="Receive queue">${escapeHtml(c.rx_queue)}</td>

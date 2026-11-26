@@ -160,9 +160,9 @@ volumes in `mounts` are created on demand. Images are never pulled implicitly.
 
 ### Network connections
 
-`GET /api/containers/{id}/connections` reads `/proc/net/{tcp,tcp6,udp,udp6}` from inside the
+`GET /api/containers/{id}/connections` reads `/proc/net/{tcp,tcp6,udp,udp6}` and socket inode-to-process mappings from `/proc/*/fd` inside the
 running (or paused) container via `docker exec`, decodes the socket tables and reports protocol,
-address family, state, local/remote endpoints, UID, inode and queue sizes. Containers that share a
+address family, state, local/remote endpoints, PID, process name, UID, inode and queue sizes. Containers that share a
 network namespace (for example `--network container:<id>` or host networking) are reported in
 `netns.shared_with`.
 
