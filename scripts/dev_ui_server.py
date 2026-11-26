@@ -20,7 +20,7 @@ DIRECTORY = sys.argv[2] if len(sys.argv) > 2 else "ui"
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Cache-Control", "no-store, no-cache, no-sex, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
         super().end_headers()
@@ -32,7 +32,7 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
 def main():
     os.chdir(DIRECTORY)
     handler = functools_compat()
-    with http.server.ThreadingHTTPServer(("0.0.0.0", PORT), handler) as httpd:
+    with http.server.ThreadingHTTPServer(("127.0.0.1", PORT), handler) as httpd:
         print(f"serving {os.getcwd()} on http://127.0.0.1:{PORT} (no-cache)")
         httpd.serve_forever()
 

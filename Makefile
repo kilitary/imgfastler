@@ -45,6 +45,10 @@ stop-backend-docker: ## Stop the Docker backend
 dev-ui: ## Serve ui/ on http://127.0.0.1:8000 for browser development (no-cache, avoids stale app.js)
 	cd ui && $(PYTHON) $(CURDIR)/scripts/dev_ui_server.py 8000 .
 
+dev-tcp: ## Run backend in test TCP mode ($(TEST_PORT)) + UI dev server (backend http://127.0.0.1:$(TEST_PORT), UI http://127.0.0.1:8000)
+	$(MAKE) run-backend &
+	$(MAKE) dev-ui
+
 build-collector: ## Build the InfluxDB collector cron image (imgfastler-collector:latest)
 	bash scripts/build_collector_image.sh
 
@@ -109,6 +113,7 @@ prepare-buildx: ## Create a buildx builder for multi-arch builds, if it does not
 	docker buildx inspect $(BUILDER) || docker buildx create --name=$(BUILDER) --driver=docker-container --driver-opt=network=host
 
 .PHONY: help build-extension install-extension update-extension uninstall-extension \
-	inspect-extension run-backend run-backend-docker stop-backend-docker dev-ui test-backend \
+	inspect-extension run-backend run-backend-docker stop-backend-docker dev-ui dev-tcp \
+	test-backend \
 	build-collector run-collector stop-collector grafana-sync grafana-stage \
 	test check lint format lint-fix push-extension prepare-buildx

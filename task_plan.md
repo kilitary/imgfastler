@@ -8,11 +8,11 @@ Set up the planning-file workflow (`task_plan.md`, `findings.md`, `progress.md`)
 
 ## Next Step
 
-Populate the planning files from the project overview gathered this session (read of README.md, backend/server.py, ui/app.js, tests, Makefile, scripts, etc.).
+Verify the fix in a running dev environment if needed; consider whether `none` network needs the same backend guard as `host`. Also check `submitCreate` toast uses stale `editContainerId` after nulling it.
 
 ## Current Phase
 
-Phase 1
+Complete (diagnosis + fix applied)
 
 ## Phases
 

@@ -30,6 +30,27 @@ It contains all three extension components:
 - **Live mode** — poll the active view every 5 seconds; the header also shows the engine version
   and the last refresh time.
 
+## Pages
+
+- **Images** — Browse, search, and manage local Docker images.
+  - Actions: filter by repository/tag/id; **Run** (open Create); **Layers**; **Delete**; click a “Used by” container to jump to Containers.
+  - Popups: **Layers** modal (image layer history).
+- **Create container** — Configure and create a container from a selected image; also used to edit/recreate an existing container.
+  - Actions: **Back**; **Documentation**; set name/restart policy/command/entrypoint/hostname; add/remove environment variables, ports, and mounts; select networks; **Create container** / submit.
+  - Popups: **Documentation** modal (Docker Hub README).
+- **Containers** — List and manage local containers.
+  - Actions: filter by name/image/id; **Connections**; **Networks**; **Logs**; **Edit**; **Start**/**Stop**/**Restart**; **Remove**.
+  - Popups: **Logs** modal (per-container log stream with follow).
+- **Networks** — Inspect Docker networks and attached containers.
+  - Actions: **Back**; **Refresh**; filter by name/driver/container IP; expand/collapse network containers.
+  - Popups: none.
+- **Logs** — Aggregated live logs across running containers.
+  - Actions: filter log lines; **Follow** on/off; **Clear**; auto-scroll.
+  - Popups: none.
+- **Connections** — Inspect TCP/UDP sockets in a container’s network namespace.
+  - Actions: **Back**; **Refresh**; filter by protocol/state/address/port/name; toggle **Resolve IPs**; **Kill** connection (experimental).
+  - Popups: **Debug Output** modal (shown when kill returns debug details/failure).
+
 ---
 
 ## Layout

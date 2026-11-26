@@ -2,6 +2,9 @@
 
 Guidance for AI agents working on this repository.
 
+- read all md files to understand structure
+- read all codebase before assigning code changes 
+
 ## What this is
 
 **imgfastler** — a Docker Desktop extension for browsing local images and creating/managing containers. It has three parts:

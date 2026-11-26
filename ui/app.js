@@ -18,10 +18,10 @@
   const VIEWS = ['images', 'create', 'containers', 'networks', 'logs', 'connections'];
   const DEFAULT_API_BASE = 'http://127.0.0.1:8099';
   const LIVE_POLL_INTERVAL = 5000;
-  const LOGS_POLL_INTERVAL = 2000;
-  const CONFIRM_TIMEOUT = 3000;
+  const LOGS_POLL_INTERVAL = 1000;
+  const CONFIRM_TIMEOUT = 4000;
   const TOAST_DURATION = 5000;
-  const NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+  const NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-~]*$/;
 
   /* ============================== plumbing =============================== */
 
@@ -39,6 +39,7 @@
     volumes: [],
     image: null,
     editContainerId: null,
+    editNetworks: null,
     connectionsContainerId: null,
     connectionsContainer: null,
     connectionsData: null,
@@ -536,14 +537,10 @@
     });
     if (!container.mounts || !container.mounts.length) addMountRow();
 
-    // Networks: check the ones the container is attached to
-    $$('#network-list input:checked').forEach((input) => {
-      input.checked = false;
-    });
-    (container.networks || []).forEach((network) => {
-      const input = $(`#network-list input[value="${escapeHtml(network)}"]`);
-      if (input) input.checked = true;
-    });
+    // Networks: remember the container's networks so renderNetworks() can
+    // restore them even if the network list is (re)loaded asynchronously.
+    state.editNetworks = (container.networks || []).slice();
+    if (state.networks.length) renderNetworks(state.editNetworks);
 
     showView('create');
   }
@@ -574,6 +571,7 @@
 
   function resetCreateForm() {
     state.editContainerId = null;
+    state.editNetworks = null;
     $('#create-form').reset();
     $('#env-rows').innerHTML = '';
     $('#port-rows').innerHTML = '';
@@ -784,15 +782,21 @@
     }
   }
 
-  function renderNetworks() {
+  function renderNetworks(selected) {
+    const prev = selected !== undefined
+      ? selected
+      : $$('#network-list input:checked').map((input) => input.value);
+    const fallback = state.editNetworks && state.editNetworks.length
+      ? state.editNetworks
+      : (state.editContainerId ? [] : ['bridge']);
+    const effective = prev.length ? prev : fallback;
     $('#network-list').innerHTML = state.networks
       .map((network) => {
         const meta = [network.driver, network.subnet].filter(Boolean).join(' · ');
+        const checked = effective.includes(network.name) ? ' checked' : '';
         return `
           <label class="chip">
-            <input type="checkbox" value="${escapeHtml(network.name)}"${
-              network.name === 'bridge' ? ' checked' : ''
-            } />
+            <input type="checkbox" value="${escapeHtml(network.name)}"${checked} />
             <span>${escapeHtml(network.name)}</span>
             <span class="chip-meta">${escapeHtml(meta)}</span>
           </label>`;
@@ -935,10 +939,13 @@
 
     const body = $('#connections-body');
     body.innerHTML =
-      '<tr class="row-loading"><td colspan="7">Loading connections…</td></tr>';
+      '<tr class="row-loading"><td colspan="10">Loading connections…</td></tr>';
     $('#connections-error').classList.add('hidden');
-    $('#connections-summary').textContent = '';
-    $('#connections-notes').textContent = '';
+    $('#connections-summary').innerHTML = '';
+    $('#connections-notes').innerHTML = '';
+    const statusEl = $('#connections-status');
+    statusEl.textContent = '';
+    statusEl.classList.remove('is-error', 'is-success');
 
     try {
       state.connectionsData = await api("get", `/api/containers/${encodeURIComponent(containerId)}/connections?resolve=1`);
@@ -962,28 +969,64 @@
     const resolveIPs = state.connectionsResolveIPs;
 
     $('#connections-title').textContent = `Network connections — ${escapeHtml(container.name || container.id || '')}`;
-    $('#connections-summary').textContent =
-      `Total: ${summary.total} · TCP: ${summary.tcp} · UDP: ${summary.udp} · ` +
-      `IPv4: ${summary.ipv4} · IPv6: ${summary.ipv6} · ` +
-      `Listening: ${summary.listening} · Established: ${summary.established}`;
+    const rxTotal = connections.reduce((sum, item) => sum + (Number(item.rx_queue) || 0), 0);
+    const txTotal = connections.reduce((sum, item) => sum + (Number(item.tx_queue) || 0), 0);
+    const stats = [
+      ['Total', summary.total, 'total'],
+      ['TCP', summary.tcp, 'tcp'],
+      ['UDP', summary.udp, 'udp'],
+      ['IPv4', summary.ipv4, 'ipv4'],
+      ['IPv6', summary.ipv6, 'ipv6'],
+      ['Listening', summary.listening, 'listening'],
+      ['Established', summary.established, 'established'],
+      ['RxQ', rxTotal, 'rxq'],
+      ['TxQ', txTotal, 'txq'],
+    ];
+    $('#connections-summary').innerHTML = stats
+      .map(
+        ([label, value, tone]) =>
+          `<div class="connection-stat connection-stat--${escapeHtml(tone)}"><span class="connection-stat-label">${escapeHtml(label)}</span><span class="connection-stat-value">${escapeHtml(value)}</span></div>`,
+      )
+      .join('');
 
     const notes = [];
-    if (netns.host_network) notes.push('Container uses host networking.');
+    if (container.state || container.image) {
+      notes.push({
+        tone: 'container',
+        icon: '◉',
+        text: `Container: ${container.state || 'unknown'}${container.image ? ` · image ${container.image}` : ''}`,
+      });
+    }
+    if (netns.pid) {
+      notes.push({ tone: 'pid', icon: '⌁', text: `Netns PID: ${netns.pid}` });
+    }
+    if (netns.host_network) {
+      notes.push({ tone: 'host', icon: '⬡', text: 'Container uses host networking' });
+    }
     if (netns.shared_with && netns.shared_with.length) {
       const peers = netns.shared_with
         .map((c) => `${c.name} (${c.state})`)
         .join(', ');
-      notes.push(`Shares network namespace with: ${peers}.`);
+      notes.push({ tone: 'shared', icon: '⇄', text: `Shares network namespace with: ${peers}` });
     }
     if (!connections.length) {
-      notes.push('No TCP or UDP sockets found in this container\'s network namespace.');
+      notes.push({
+        tone: 'empty',
+        icon: '○',
+        text: 'No TCP or UDP sockets found in this container\'s network namespace',
+      });
     }
-    $('#connections-notes').textContent = notes.join(' ');
+    $('#connections-notes').innerHTML = notes
+      .map(
+        (note) =>
+          `<span class="connection-note connection-note--${escapeHtml(note.tone)}"><span class="connection-note-icon" aria-hidden="true">${escapeHtml(note.icon)}</span><span class="connection-note-text">${escapeHtml(note.text)}</span></span>`,
+      )
+      .join('');
 
     const query = $('#connection-search').value.trim().toLowerCase();
     const filtered = connections.filter((c) => {
       if (!query) return true;
-      const haystack = `${c.protocol} ${c.family} ${c.state} ${c.local_address}:${c.local_port} ${c.remote_address}:${c.remote_port} ${c.uid} ${c.inode} ${
+      const haystack = `${c.protocol} ${c.family} ${c.state} ${c.local_address}:${c.local_port} ${c.remote_address}:${c.remote_port} ${c.uid} ${c.inode} ${c.rx_queue} ${c.tx_queue} ${
         c.local_resolved || ''
       } ${c.remote_resolved || ''}`.toLowerCase();
       return haystack.includes(query);
@@ -1007,11 +1050,13 @@
             <td>${escapeHtml(c.family)}</td>
             <td><span class="badge ${
               c.state === 'LISTEN' ? 'is-running' : c.state === 'ESTABLISHED' ? 'is-running' : 'is-other'
-            }">${escapeHtml(c.state)}</span></td>
+            }" title="State code: ${escapeHtml(c.state_code || '')}">${escapeHtml(c.state)}</span></td>
             <td title="${escapeHtml(c.local_address)}">${local}</td>
             <td title="${escapeHtml(c.remote_address)}">${remote}</td>
-            <td>${escapeHtml(c.uid)}</td>
+            <td title="User ID">${escapeHtml(c.uid)}${String(c.uid) === '0' ? ' <span class="muted">(root)</span>' : ''}</td>
             <td class="mono">${escapeHtml(c.inode)}</td>
+            <td class="mono" title="Receive queue">${escapeHtml(c.rx_queue)}</td>
+            <td class="mono" title="Transmit queue">${escapeHtml(c.tx_queue)}</td>
             <td class="col-actions">
               ${canKill ? '<button class="btn btn-sm btn-danger" data-action="kill-connection" type="button">Kill</button>' : '<span class="muted">—</span>'}
             </td>
@@ -1168,6 +1213,15 @@
     });
 
     const networks = $$('#network-list input:checked').map((input) => input.value);
+    if (networks.includes('host') && networks.length > 1) {
+      errors.push("The 'host' network cannot be combined with other networks");
+    }
+    if (networks.includes('host') && ports.length) {
+      errors.push('Port mappings cannot be used with host network mode');
+    }
+    if (networks.includes('host') && $('#c-hostname').value.trim()) {
+      errors.push('Hostname cannot be set with host network mode');
+    }
 
     return {
       spec: {
@@ -1201,7 +1255,8 @@
     setBusy(true);
     status.textContent = '';
     try {
-      if (state.editContainerId) {
+      const wasEdit = !!state.editContainerId;
+      if (wasEdit) {
         // Edit mode: stop + remove the old container, then create a new one
         // with the edited parameters.
         await api('post', `/api/containers/${state.editContainerId}/stop`);
@@ -1210,7 +1265,7 @@
       }
       const created = await api('post', '/api/containers', spec);
       const label = created.name || created.short_id || 'container';
-      toast('success', `Container “${label}” ${state.editContainerId ? 'recreated' : 'started'}`);
+      toast('success', `Container “${label}” ${wasEdit ? 'recreated' : 'started'}`);
       (created.warnings || []).forEach((warning) => toast('error', warning));
       // Inform about networks that already have containers connected.
       (created.networks || []).forEach((network) => {
@@ -1494,6 +1549,48 @@
   function closeDocs() {
     docsRequestId += 1;
     $('#docs-modal').classList.add('hidden');
+  }
+
+  /* ----------------------------- kill modal ----------------------------- */
+
+  let killInProgress = false;
+  let killDebugText = '';
+
+  function openKillModal(message) {
+    killInProgress = true;
+    killDebugText = '';
+    $('#kill-title').textContent = 'Kill connection';
+    $('#kill-modal-status').textContent = message || 'Preparing…';
+    $('#kill-modal-status').className = 'kill-modal-status';
+    $('#kill-modal-detail').textContent = '';
+    $('#kill-modal-detail').classList.add('hidden');
+    $('#kill-modal-debug').classList.add('hidden');
+    $('#kill-modal-debug').disabled = true;
+    $('#kill-modal-close').disabled = true;
+    $('#kill-modal').classList.remove('hidden');
+  }
+
+  function setKillModal(message, tone = '', detail = '') {
+    $('#kill-modal-status').textContent = message;
+    $('#kill-modal-status').className = `kill-modal-status${tone ? ` is-${tone}` : ''}`;
+    if (detail) {
+      $('#kill-modal-detail').textContent = detail;
+      $('#kill-modal-detail').classList.remove('hidden');
+    }
+  }
+
+  function finishKillModal({ tone = '', message = '', detail = '', debugText = '' } = {}) {
+    killInProgress = false;
+    setKillModal(message, tone, detail);
+    killDebugText = debugText || '';
+    $('#kill-modal-debug').classList.toggle('hidden', !killDebugText);
+    $('#kill-modal-debug').disabled = !killDebugText;
+    $('#kill-modal-close').disabled = false;
+  }
+
+  function closeKillModal() {
+    if (killInProgress) return;
+    $('#kill-modal').classList.add('hidden');
   }
 
   /* ------------------------------- logs -------------------------------- */
@@ -1818,6 +1915,26 @@
     $('#networks-back-btn').addEventListener('click', () => showView('containers'));
     $('#networks-refresh-btn').addEventListener('click', () => loadNetworksList());
     $('#network-search').addEventListener('input', renderNetworksList);
+    $('#network-list').addEventListener('change', (event) => {
+      const input = event.target.closest('input[type="checkbox"]');
+      if (!input) return;
+      state.editNetworks = null;
+      const name = input.value;
+      const isHostLike = name === 'host' || name === 'none';
+      if (input.checked && isHostLike) {
+        $$('#network-list input[type="checkbox"]').forEach((cb) => {
+          if (cb !== input) cb.checked = false;
+        });
+        // Host/none mode is incompatible with port publishing and hostname.
+        $('#c-hostname').value = '';
+        $$('#port-rows .row').forEach((row) => row.remove());
+        addPortRow();
+      } else if (input.checked) {
+        $$('#network-list input[type="checkbox"]').forEach((cb) => {
+          if ((cb.value === 'host' || cb.value === 'none') && cb !== input) cb.checked = false;
+        });
+      }
+    });
     $('#connections-back-btn').addEventListener('click', () => showView('containers'));
     $('#connections-refresh-btn').addEventListener('click', () => loadConnections());
     $('#connection-search').addEventListener('input', renderConnections);
@@ -1833,46 +1950,60 @@
       const { action } = button.dataset;
       if (action === 'kill-connection') {
           const statusEl = $('#connections-status');
-          const printStatus = (text, isError) => {
+          const printStatus = (text, tone = '') => {
             if (statusEl) {
               statusEl.textContent = text;
-              statusEl.classList.toggle('is-error', Boolean(isError));
+              statusEl.classList.toggle('is-error', tone === 'error' || tone === true);
+              statusEl.classList.toggle('is-success', tone === 'success');
             }
           };
 
-          try {
           const params = new URLSearchParams({ inode });
           if (localAddress) params.set('local_address', localAddress);
           if (localPort) params.set('local_port', localPort);
           if (remoteAddress) params.set('remote_address', remoteAddress);
           if (remotePort) params.set('remote_port', remotePort);
+
           button.disabled = true;
+          openKillModal('Kill requested — waiting for result…');
+          setKillModal('Killing connection…', '', `${localAddress || ''}:${localPort || ''} → ${remoteAddress || ''}:${remotePort || ''}`);
           printStatus('Kill requested — waiting for result…');
-          const result = await api('post', `/api/containers/${encodeURIComponent(state.connectionsContainerId)}/connections/kill?${params}`);
 
-          // Print the backend's own result status either way, then refresh.
-          printStatus(
-            `${result.killed ? '✔' : '✘'} ${result.message || (result.killed ? 'Connection killed' : 'Kill failed')}`,
-            !result.killed
-          );
-          await loadConnections();
+          try {
+            const result = await api('post', `/api/containers/${encodeURIComponent(state.connectionsContainerId)}/connections/kill?${params}`);
+            const message = result.message || (result.killed ? 'Connection killed' : 'Kill failed');
+            const tone = result.killed ? 'success' : 'error';
+            const notice = 'NOTICE: TCP Kill is available in Premium VIP account ($100,000).';
+            const debugText = !result.killed
+              ? `${notice}\n\n${result.debug && result.debug.length > 0 ? result.debug.join('\n\n') : 'No debug output returned.'}`
+              : '';
 
-          if (result.killed) {
-            toast('success', result.message || 'Connection killed');
-          } else {
-            // Show debug modal if not killed
-            if (result.debug && result.debug.length > 0) {
-              $('#debug-output').textContent = result.debug.join('\n\n');
-              $('#debug-modal').classList.remove('hidden');
+            printStatus(`${result.killed ? '✔' : '✘'} ${message}`, tone);
+            await loadConnections();
+            finishKillModal({
+              tone,
+              message: `${result.killed ? '✔' : '✘'} ${message}`,
+              detail: `${localAddress || ''}:${localPort || ''} → ${remoteAddress || ''}:${remotePort || ''}`,
+              debugText,
+            });
+
+            if (result.killed) {
+              toast('success', message);
+            } else {
+              toast('error', message || 'Failed to kill connection - see debug output');
             }
-            toast('error', result.message || 'Failed to kill connection - see debug output');
+          } catch (error) {
+            const message = `✘ Kill request failed: ${errorMessage(error)}`;
+            printStatus(message, 'error');
+            finishKillModal({
+              tone: 'error',
+              message,
+              detail: `${localAddress || ''}:${localPort || ''} → ${remoteAddress || ''}:${remotePort || ''}`,
+            });
+            showError(error);
+          } finally {
+            button.disabled = false;
           }
-        } catch (error) {
-          printStatus(`✘ Kill request failed: ${errorMessage(error)}`, true);
-          showError(error);
-        } finally {
-          button.disabled = false;
-        }
       }
     });
 
@@ -1881,6 +2012,15 @@
     });
     $('#debug-close-btn').addEventListener('click', () => {
       $('#debug-modal').classList.add('hidden');
+    });
+    $('#kill-modal-close').addEventListener('click', closeKillModal);
+    $('#kill-modal-debug').addEventListener('click', () => {
+      if (!killDebugText) return;
+      $('#debug-output').textContent = killDebugText;
+      $('#debug-modal').classList.remove('hidden');
+    });
+    $('#kill-modal').addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) closeKillModal();
     });
     $('#resolve-ips').addEventListener('change', (event) => {
       state.connectionsResolveIPs = event.target.checked;
@@ -1908,6 +2048,7 @@
     // Escape closes whichever modal is currently open.
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
+      if (killInProgress && !$('#kill-modal').classList.contains('hidden')) return;
       const open = document.querySelector('.modal-backdrop:not(.hidden)');
       if (!open) return;
       const closer = open.querySelector('button[id$="-close"], #docs-close-btn');

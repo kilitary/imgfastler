@@ -125,7 +125,7 @@ logging.basicConfig(
 
 # --- app ---------------------------------------------------------------net
 
-app = FastAPI(title="imgfastler backend", version="1.0.0")
+app = FastAPI(title="imgfastler backend", version="0.0.3")
 app.add_middleware(
     CORSMiddleware,
     # The extension UI is served by Docker Desktop, requests are proxied to
@@ -1402,6 +1402,23 @@ def create_container(spec: ContainerSpec) -> dict[str, Any]:
                 detail=f"Network '{network_name}' not found: {_extract_error_message(exc)}",
             ) from exc
 
+    if "host" in networks and len(networks) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="The 'host' network cannot be combined with other networks.",
+        )
+    if "host" in networks:
+        if spec.ports:
+            raise HTTPException(
+                status_code=400,
+                detail="Port mappings cannot be used with host network mode.",
+            )
+        if spec.hostname:
+            raise HTTPException(
+                status_code=400,
+                detail="Hostname cannot be set with host network mode.",
+            )
+
     # Build container kwargs
     kwargs: dict[str, Any] = {"detach": True}
 
@@ -1663,7 +1680,10 @@ def kill_connection(
 
     try:
         # Get connection details from container if not provided
-        if not all([local_address, local_port, remote_address, remote_port]):
+        if any(
+            value is None
+            for value in (local_address, local_port, remote_address, remote_port)
+        ):
             get_conn_script = f"""
             if command -v ss >/dev/null 2>&1; then
                 ss -tuna | grep "inode={inode}" || echo "Not found"
@@ -1685,7 +1705,10 @@ def kill_connection(
                 remote_port = int(remote_port)
 
         # Only proceed if we have connection details
-        if not all([local_address, local_port, remote_address, remote_port]):
+        if any(
+            value is None
+            for value in (local_address, local_port, remote_address, remote_port)
+        ):
             return {
                 "inode": inode,
                 "killed": False,

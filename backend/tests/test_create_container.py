@@ -398,3 +398,56 @@ def test_build_port_bindings() -> None:
 def test_build_port_bindings_defaults_host_ip() -> None:
     ports = [server.PortSpec(container_port=80, host_port=8080)]
     assert server._build_port_bindings(ports) == {"80/tcp": ("0.0.0.0", 8080)}
+
+
+# --- host network constraints --------------------------------------------
+
+
+def test_host_network_rejected_with_other_networks(
+    api: TestClient, fake: FakeDocker
+) -> None:
+    response = api.post(
+        "/api/containers",
+        json={"image": IMAGE, "networks": ["host", "bridge"]},
+    )
+    assert response.status_code == 400, response.text
+    assert "cannot be combined" in response.json()["detail"]
+    assert fake.run_calls == []
+
+
+def test_host_network_rejected_with_ports(api: TestClient, fake: FakeDocker) -> None:
+    response = api.post(
+        "/api/containers",
+        json={
+            "image": IMAGE,
+            "networks": ["host"],
+            "ports": [{"container_port": 80, "host_port": 8080}],
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "Port mappings cannot be used with host network mode" in response.json()[
+        "detail"
+    ]
+    assert fake.run_calls == []
+
+
+def test_host_network_rejected_with_hostname(
+    api: TestClient, fake: FakeDocker
+) -> None:
+    response = api.post(
+        "/api/containers",
+        json={"image": IMAGE, "networks": ["host"], "hostname": "my-host"},
+    )
+    assert response.status_code == 400, response.text
+    assert "Hostname cannot be set with host network mode" in response.json()["detail"]
+    assert fake.run_calls == []
+
+
+def test_create_with_host_network(api: TestClient, fake: FakeDocker) -> None:
+    response = api.post("/api/containers", json={"image": IMAGE, "networks": ["host"]})
+    assert response.status_code == 201, response.text
+    image, kwargs = fake.run_calls[0]
+    assert image == IMAGE
+    assert kwargs["network"] == "host"
+    assert "ports" not in kwargs
+    assert "hostname" not in kwargs
