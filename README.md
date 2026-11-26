@@ -158,11 +158,7 @@ address family, state, local/remote endpoints, UID, inode and queue sizes. Conta
 network namespace (for example `--network container:<id>` or host networking) are reported in
 `netns.shared_with`.
 
-`POST …/connections/kill` is **experimental**. It tries socket-level methods (`ss -K`, then a
-short-lived `nicolaka/netshoot` helper container connected to the target container's network and
-PID namespaces). The netshoot helper runs a comprehensive kill script trying multiple `ss -K` syntax
-variations and `tcpkill` commands. Returns debug output when no method succeeds. Unlike container
-creation, the netshoot helper may need to be pulled the first time it runs.
+`POST …/connections/kill` is **experimental**. It tries socket-level methods (`ss-kill` bundled from the host, then tcpkill via copied bundle/helper). Returns debug output when no method succeeds. Unlike container creation, helper-based fallbacks may need to be pulled the first time they run.
 
 ---
 

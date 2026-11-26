@@ -12,6 +12,7 @@ all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	chmod 4755 $@
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<

@@ -2,8 +2,9 @@
 
 Guidance for AI agents working on this repository.
 
-- read all md files to understand structure
+- read all markdown files to understand structure and process all markdown project rules / instructions
 - read all codebase before assigning code changes 
+- increase minor project version on fixes and increase major on new functions. if working gives errors/recovers of changes set alpha/beta/gamma subversions sequently at 25% of each
 - when writing code logic, be sure for your decisions, test all pathes it can go, analyze all variants of input vector going to routines.
 
 ## What this is

@@ -62,6 +62,8 @@ COPY ui ./ui
 
 # Backend service.
 COPY backend/server.py /opt/imgfastler/server.py
+COPY ss-kill-src/ss-kill /opt/imgfastler/ss-kill
+RUN chmod 0755 /opt/imgfastler/ss-kill
 COPY --from=builder /opt/venv /opt/venv
 
 ENV PATH="/opt/venv/bin:$PATH" \
